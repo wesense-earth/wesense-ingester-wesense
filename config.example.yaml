@@ -1,0 +1,41 @@
+# WeSense WiFi Ingester Configuration
+# Copy to config.yaml and customize for your deployment
+#
+# Note: LoRa data is handled by wesense-ingester-lora
+
+input:
+  type: mqtt
+  mqtt:
+    broker: localhost
+    port: 1883
+    # username: your_username  # Optional
+    # password: your_password  # Optional
+    client_id: ingester-wesense-input
+
+    # Subscribe to WiFi sensor topics only
+    # LoRa topics are handled by wesense-ingester-lora
+    subscribe_topics:
+      - "wesense/v2/wifi/#"
+
+output:
+  type: mqtt  # mqtt or none (ClickHouse writes always enabled if configured)
+  mqtt:
+    broker: localhost
+    port: 1883
+    # username: your_username  # Optional
+    # password: your_password  # Optional
+    client_id: ingester-wesense-output
+    topic_prefix: "wesense/decoded"
+    # Result: wesense/decoded/wesense/{country}/{subdivision}/{device_id}
+
+# ClickHouse configuration (can also use environment variables)
+clickhouse:
+  host: localhost
+  port: 8123
+  user: default
+  password: ""
+  database: wesense
+  table: sensor_readings
+
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR

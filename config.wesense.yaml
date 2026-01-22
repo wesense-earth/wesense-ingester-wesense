@@ -1,0 +1,47 @@
+# WeSense Ingester Configuration
+# Ingests WeSense v2 protobuf messages and writes to ClickHouse
+
+input:
+  type: mqtt
+
+  mqtt:
+    broker: localhost
+    port: 1883
+    # username: your_username  # Or use env: MQTT_USERNAME
+    # password: your_password  # Or use env: MQTT_PASSWORD
+    client_id: ingester-wesense-input
+
+    # Subscribe to v2 sensor topics
+    subscribe_topics:
+      - "wesense/v2/#"           # All WeSense sensors (WiFi + LoRa)
+
+# Optional MQTT output for debugging (set type to 'mqtt' to enable)
+output:
+  type: none  # 'mqtt' or 'none'
+
+  mqtt:
+    broker: localhost
+    port: 1883
+    client_id: ingester-wesense-output
+    topic_prefix: "wesense/decoded"
+
+# ClickHouse configuration (can also use environment variables)
+# Environment variables take precedence:
+#   CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER,
+#   CLICKHOUSE_PASSWORD, CLICKHOUSE_DATABASE, CLICKHOUSE_TABLE
+clickhouse:
+  host: localhost
+  port: 8123
+  user: default
+  password: ""
+  database: wesense
+  table: sensor_readings
+
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+
+# Notes:
+# - Primary output is ClickHouse (batched writes)
+# - MQTT output is optional, for debugging only
+# - All config values can be overridden with environment variables
+# - Run with: python ingester_wesense.py --config config.wesense.yaml

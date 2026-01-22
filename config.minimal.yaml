@@ -1,0 +1,21 @@
+# Minimal WeSense Decoder Configuration
+# Use this when configuring via environment variables
+# All settings can be overridden with env vars
+
+input:
+  type: mqtt
+  mqtt:
+    broker: localhost  # Override with MQTT_BROKER
+    port: 1883         # Override with MQTT_PORT
+    subscribe_topics:
+      - "wesense/v2/#"   # Override with MQTT_SUBSCRIBE_TOPICS
+
+output:
+  type: mqtt
+  mqtt:
+    broker: localhost  # Override with MQTT_BROKER
+    port: 1883         # Override with MQTT_PORT
+    preserve_topics: true  # Override with MQTT_PRESERVE_TOPICS
+
+logging:
+  level: INFO  # Override with LOG_LEVEL
