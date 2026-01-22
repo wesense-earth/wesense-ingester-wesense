@@ -1,0 +1,325 @@
+syntax = "proto3";
+
+/*
+ * WeSense Homebrew Beacon v2.3 - Split Message Architecture
+ *
+ * VERSION 2.3 CHANGES:
+ * - Expanded BoardType enum with Meshtastic hardware types
+ * - Added LilyGo T-Echo, T-Deck, T-LoRa variants
+ * - Added Heltec Wireless Stick Lite, Tracker, Paper
+ * - Added RAK Wireless boards (RAK4631, RAK11200, RAK11310)
+ * - Added generic ESP32 variants (S2, C2, C3, C6, H2, ESP8266)
+ * - Added DFRobot ESP32 C6 Beetle
+ * - Added DIY/custom board types (PORTDUINO, NRF52_PROMICRO_DIY)
+ * - Reorganized BoardType enum with logical groupings (1-19 LilyGo, 20-29 Heltec, etc.)
+ *
+ * VERSION 2.2 CHANGES:
+ * - Added node_info field for physical setup description (e.g., "outdoor pole, perspex case")
+ * - Added node_info_url field for link to detailed documentation
+ * - These fields help with data analysis by describing environmental factors
+ *
+ * VERSION 2.1 CHANGES:
+ * - Split into SensorReadingV2 (frequent) + DeviceMetadataV2 (infrequent)
+ * - Added BoardType enum (collapses vendor/product_line/device_type)
+ * - Added CalibrationStatus and CalibrationMethod enums
+ * - Added altitude_cm and node_name fields
+ * - Removed transport_type from messages (inferred from MQTT topic)
+ * - Added extended particle count ReadingTypes
+ *
+ * Architecture:
+ * - WiFi sensors: Send full SensorReadingV2 every 5 minutes
+ * - LoRa sensors: Send minimal SensorReadingV2 every 5-10 minutes
+ *                 Send DeviceMetadataV2 on boot + daily
+ *
+ * Payload sizes:
+ * - LoRa minimal (5 sensors): ~49 bytes (fits DR3)
+ * - LoRa standard (8 sensors): ~70 bytes (fits DR4)
+ * - WiFi full (14 sensors): ~170-330 bytes (depends on node_info usage)
+ */
+
+package wesense.homebrew.v2;
+
+// =============================================================================
+// ENUMERATIONS
+// =============================================================================
+
+// BoardType - Collapsed from Vendor/ProductLine/DeviceType (v2.1)
+// Saves ~4 bytes per message vs separate enums
+// v2.3: Expanded to include Meshtastic hardware types and more ESP32 variants
+enum BoardType {
+  BOARD_UNKNOWN = 0;
+
+  // === LilyGo boards (1-19) ===
+  LILYGO_T3_S3 = 1;               // T3 S3 (generic)
+  LILYGO_T_BEAM = 2;              // T-Beam (generic)
+  LILYGO_T_BEAM_S3 = 3;           // T-Beam S3
+  LILYGO_T3_LORA32 = 4;           // T3 LoRa32 (non-S3)
+  LILYGO_T3_S3_V1_3 = 5;          // T3 S3 v1.3 specifically
+  LILYGO_T3_S3_LR1121 = 6;        // T3 S3 with LR1121 radio
+  LILYGO_T_BEAM_V0_7 = 7;         // T-Beam v0.7 (older)
+  LILYGO_T_BEAM_S3_CORE = 8;      // T-Beam S3 Core
+  LILYGO_T_ECHO = 9;              // T-Echo (e-ink)
+  LILYGO_T_DECK = 10;             // T-Deck (keyboard)
+  LILYGO_TLORA_V1 = 11;           // T-LoRa V1
+  LILYGO_TLORA_V2_1_1P6 = 12;     // T-LoRa V2.1 1.6
+
+  // === Heltec boards (20-29) ===
+  HELTEC_WIFI_LORA_32_V2 = 20;    // WiFi LoRa 32 V2.0
+  HELTEC_WIFI_LORA_32_V3 = 21;    // WiFi LoRa 32 V3
+  HELTEC_WIRELESS_STICK_LITE_V3 = 22;  // Wireless Stick Lite V3
+  HELTEC_WIRELESS_TRACKER = 23;   // Wireless Tracker (GPS)
+  HELTEC_WIRELESS_PAPER = 24;     // Wireless Paper (e-ink)
+  HELTEC_HT62 = 25;               // HT62
+
+  // === RAK Wireless boards (30-39) ===
+  RAK4631 = 30;                   // nRF52840 + SX1262
+  RAK11200 = 31;                  // ESP32 + SX1262
+  RAK11310 = 32;                  // RP2040 + SX1262
+
+  // === Generic ESP32 variants (40-59) ===
+  ESP32_DEVKIT = 40;              // ESP32 WROOM-32 / Generic
+  ESP32_S2_DEVKIT = 41;
+  ESP32_S3_DEVKIT = 42;
+  ESP32_C3_DEVKIT = 43;
+  ESP32_C6_DEVKIT = 44;
+  ESP32_C2_DEVKIT = 45;
+  ESP32_H2_DEVKIT = 46;           // Zigbee/Thread
+  ESP8266_D1_MINI = 47;           // D1 Mini / NodeMCU
+
+  // === DFRobot boards (60-69) ===
+  DFROBOT_ESP32_C6_BEETLE = 60;
+
+  // === Other manufacturers (70-79) ===
+  STATION_G2 = 70;                // Station G2
+  CDEBYTE_EORA_S3 = 71;           // CDEBYTE EORA S3
+  RP2040_LORA = 72;               // Generic RP2040 + LoRa
+  RPI_PICO = 73;                  // Raspberry Pi Pico
+
+  // === DIY / Custom (80-89) ===
+  CUSTOM_HOMEBREW = 80;
+  DIY_V1 = 81;                    // Generic DIY build
+  NRF52_PROMICRO_DIY = 82;        // nRF52 ProMicro DIY
+  PORTDUINO = 83;                 // Linux/software based
+  PRIVATE_HW = 84;                // Private/undisclosed hardware
+
+  // === Pre-calibrated commercial (100+) ===
+  WESENSE_SENTINEL = 100;
+  WESENSE_SCOUT = 101;
+}
+
+// CalibrationStatus - Current state of sensor calibration
+enum CalibrationStatus {
+  CALIBRATION_UNKNOWN = 0;
+  UNCALIBRATED = 1;           // Factory default, no calibration
+  CALIBRATING = 2;            // ASC in progress, learning
+  FACTORY_CALIBRATED = 3;     // Factory calibration only
+  FIELD_CALIBRATED = 4;       // FRC or ASC complete
+}
+
+// CalibrationMethod - How the sensor was calibrated
+enum CalibrationMethod {
+  METHOD_UNKNOWN = 0;
+  FACTORY = 1;                // Manufacturer calibration
+  ASC_LEARNING = 2;           // Automatic Self-Calibration in progress
+  ASC_COMPLETE = 3;           // ASC established baseline
+  FRC_MANUAL = 4;             // Forced Recalibration performed
+  REFERENCE_GAS = 5;          // Calibrated against reference gas
+}
+
+// ReadingType - What is being measured
+enum ReadingType {
+  READING_UNKNOWN = 0;
+  TEMPERATURE = 1;            // °C
+  HUMIDITY = 2;               // %RH
+  CO2 = 3;                    // ppm
+  PRESSURE = 4;               // hPa
+  PM1 = 5;                    // µg/m³
+  PM2_5 = 6;                  // µg/m³ (renamed from PM25 for clarity)
+  PM10 = 7;                   // µg/m³
+  VOC_INDEX = 8;              // 0-500 index
+  NOX_INDEX = 9;              // 0-500 index
+  VOLTAGE = 10;               // V
+  CURRENT = 11;               // mA
+  POWER = 12;                 // mW
+  BATTERY_LEVEL = 13;         // %
+  GAS_RESISTANCE = 14;        // kOhm (BME680)
+
+  // Extended particle counts (WiFi only, v2.1)
+  PC_03UM = 20;               // count/L (>0.3µm)
+  PC_05UM = 21;               // count/L (>0.5µm)
+  PC_10UM = 22;               // count/L (>1.0µm)
+  PC_25UM = 23;               // count/L (>2.5µm)
+  PC_50UM = 24;               // count/L (>5.0µm)
+  PC_100UM = 25;              // count/L (>10µm)
+}
+
+// SensorModel - Which sensor IC produced the reading
+enum SensorModel {
+  SENSOR_UNKNOWN = 0;
+  SHT4X = 1;                  // Sensirion temp/humidity
+  AHT20 = 2;                  // Aosong temp/humidity
+  SCD4X = 3;                  // Sensirion CO2
+  BMP280 = 4;                 // Bosch pressure
+  BME280 = 5;                 // Bosch pressure/humidity
+  BME680 = 6;                 // Bosch pressure/humidity/VOC
+  SGP41 = 7;                  // Sensirion VOC/NOx
+  PMS5003 = 8;                // Plantower PM sensor
+  INA219 = 9;                 // TI current/voltage
+  BMP390 = 10;                // Bosch pressure (high precision)
+  SCD30 = 11;                 // Sensirion CO2 (older model)
+  CM1106C = 12;               // Cubic CM1106-C NDIR CO2 (I2C or UART)
+  TMP117 = 13;                // TI high-precision temperature (±0.1°C)
+  AXP2101 = 14;               // X-Powers PMU (battery management)
+}
+
+// DeploymentType - Indoor/Outdoor classification
+enum DeploymentType {
+  DEPLOYMENT_UNKNOWN = 0;
+  INDOOR = 1;
+  OUTDOOR = 2;
+  MIXED = 3;                  // e.g., garage, covered outdoor
+}
+
+// -----------------------------------------------------------------------------
+// DEPRECATED ENUMS (kept for backward compatibility with v2.0)
+// Use BoardType instead for new implementations
+// -----------------------------------------------------------------------------
+
+enum Vendor {
+  VENDOR_UNKNOWN = 0;
+  WESENSE = 1;
+  MESHTASTIC = 2;
+  PURPLEAIR = 3;
+  AWAIR = 4;
+}
+
+enum ProductLine {
+  PRODUCT_UNKNOWN = 0;
+  HOMEBREW = 1;
+  SENTINEL = 2;
+  SCOUT = 3;
+  COMMUNITY = 4;
+  OFFICIAL = 5;
+}
+
+enum DeviceType {
+  DEVICE_UNKNOWN = 0;
+  BEACON = 1;
+  WATCHPOINT = 2;
+  DEVICE_SCOUT = 3;
+  RELAY = 4;
+  NODE = 5;
+  STATION = 6;
+}
+
+enum LocationSource {
+  LOCATION_UNKNOWN = 0;
+  GPS_ACTIVE = 1;
+  STATIC_HARDCODED = 2;
+  REMOTE_MQTT = 3;
+}
+
+// TransportType - Kept for reference but NOT used in messages
+// Transport is inferred from MQTT topic by ingesters
+enum TransportType {
+  TRANSPORT_UNKNOWN = 0;
+  WIFI_MQTT = 1;
+  LORAWAN = 2;
+  TRANSPORT_MESHTASTIC = 3;
+  CELLULAR = 4;
+  SATELLITE = 5;
+}
+
+// =============================================================================
+// MESSAGES
+// =============================================================================
+
+/*
+ * Individual sensor measurement
+ *
+ * Size: ~7 bytes (LoRa), ~8 bytes (WiFi with calibration)
+ * - ReadingType enum (1-2 bytes)
+ * - float value (5 bytes)
+ * - SensorModel enum (1 byte, optional)
+ * - CalibrationStatus (1 byte, optional, WiFi only)
+ */
+message SensorValue {
+  ReadingType reading_type = 1;       // What is being measured
+  float value = 2;                    // The measurement value
+  SensorModel sensor_model = 3;       // Which sensor IC (optional)
+  CalibrationStatus calibration = 4;  // Calibration state (optional, WiFi only)
+}
+
+/*
+ * Per-sensor calibration info (used in DeviceMetadataV2)
+ */
+message SensorCalibration {
+  SensorModel sensor_model = 1;       // Which sensor
+  CalibrationStatus status = 2;       // Current calibration state
+  CalibrationMethod method = 3;       // How it was calibrated
+  fixed32 calibration_date = 4;       // When calibrated (Unix epoch)
+}
+
+/*
+ * SensorReadingV2 - Frequent sensor data message
+ *
+ * Sent every 5-10 minutes with current sensor values.
+ *
+ * LoRa sensors: Send only required fields (device_id, timestamp, measurements)
+ * WiFi sensors: Send all fields including location, board_type, node_name
+ *
+ * Size:
+ * - LoRa minimal (5 sensors): ~49 bytes
+ * - WiFi full (14 sensors): ~170 bytes
+ */
+message SensorReadingV2 {
+  // === REQUIRED (always sent) ===
+  fixed64 device_id = 1;              // MAC address as uint64 (8 bytes)
+  fixed32 timestamp = 2;              // Unix epoch seconds (4 bytes)
+  repeated SensorValue measurements = 10;  // Sensor readings (variable)
+
+  // === WIFI ONLY (omit for LoRa to save bandwidth) ===
+  sfixed32 latitude_e5 = 3;           // Latitude × 100000 (4 bytes)
+  sfixed32 longitude_e5 = 4;          // Longitude × 100000 (4 bytes)
+  sfixed32 altitude_cm = 5;           // Altitude in cm (4 bytes) - v2.1
+  BoardType board_type = 6;           // Hardware type (1-2 bytes) - v2.1
+  DeploymentType deployment_type = 7; // Indoor/Outdoor/Mixed (1 byte)
+  string node_name = 11;              // Friendly name, max 24 chars - v2.1
+  string node_info = 12;              // Physical setup description, max 64 chars - v2.2
+  string node_info_url = 13;          // URL to detailed documentation, max 96 chars - v2.2
+
+  // === DEPRECATED (v2.0 compatibility) ===
+  // Use board_type instead for new implementations
+  Vendor vendor = 15;                 // Deprecated: use board_type
+  ProductLine product_line = 16;      // Deprecated: use board_type
+  DeviceType device_type = 17;        // Deprecated: use board_type
+}
+
+/*
+ * DeviceMetadataV2 - Infrequent device metadata message (v2.1)
+ *
+ * Sent on startup, daily, and when calibration status changes.
+ * Used by LoRa sensors to send metadata separately from readings.
+ *
+ * Size: ~90 bytes
+ */
+message DeviceMetadataV2 {
+  fixed64 device_id = 1;              // MAC address as uint64
+  fixed32 timestamp = 2;              // When metadata was sent
+
+  // Location (static for most deployments)
+  sfixed32 latitude_e5 = 3;           // Latitude × 100000
+  sfixed32 longitude_e5 = 4;          // Longitude × 100000
+  sfixed32 altitude_cm = 5;           // Altitude in cm
+
+  // Device identification
+  BoardType board_type = 6;           // Hardware type
+  DeploymentType deployment_type = 7; // Indoor/Outdoor/Mixed
+  string node_name = 8;               // Friendly name, max 24 chars
+  string firmware_version = 9;        // e.g., "2.1.0", max 16 chars
+  string node_info = 11;              // Physical setup description, max 64 chars - v2.2
+  string node_info_url = 12;          // URL to detailed documentation, max 96 chars - v2.2
+
+  // Calibration status (per sensor type)
+  repeated SensorCalibration calibrations = 10;
+}

@@ -1,0 +1,15 @@
+# MQTT client
+paho-mqtt>=1.6.1,<2.0.0
+
+# Protobuf for WeSense v2 format
+protobuf>=5.26.0
+
+# Configuration
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0.0
+
+# Reverse geocoding (GeoNames offline database)
+reverse_geocoder==1.5.1
+
+# ClickHouse client
+clickhouse-connect>=0.7.0
