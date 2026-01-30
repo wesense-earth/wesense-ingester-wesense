@@ -1,56 +1,40 @@
-# WeSense Ingester - WiFi
-# Build: docker build -t wesense-ingester-wesense .
+# WeSense Ingester (Unified)
+# Build context: parent directory (wesense/)
+# Build: docker build -f wesense-ingester-wesense/Dockerfile -t wesense-ingester-wesense .
 #
-# Ingests WeSense WiFi sensor data:
-# - Subscribes to wesense/v2/wifi/# topics
-# - Decodes WeSense v2.1 protobuf (SensorReadingV2)
-# - Reverse geocodes lat/lon using offline GeoNames database
-# - Writes to ClickHouse sensor_readings table
+# Unified ingester for WeSense WiFi + LoRa + TTN webhook.
+# Subscribes to wesense/v2/wifi/# and wesense/v2/lora/# topics.
+# Optionally runs TTN webhook HTTP server (TTN_WEBHOOK_ENABLED=true).
 #
-# Note: LoRa data is handled by wesense-ingester-lora (with metadata caching)
+# Expects wesense-ingester-core to be available at ../wesense-ingester-core
+# when building with docker-compose (which sets the build context).
 
 FROM python:3.11-slim
 
-LABEL maintainer="WeSense Project"
-LABEL description="WeSense Ingester - WiFi sensor data with v2.1 protobuf support"
-LABEL version="2.1.0"
-
 WORKDIR /app
 
-# Install gosu for user switching
+# Copy dependency files first for better layer caching
+COPY wesense-ingester-core/ /tmp/wesense-ingester-core/
+COPY wesense-ingester-wesense/requirements-docker.txt .
+
+# Install gcc, build all pip packages, then remove gcc in one layer
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gosu && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends gcc && \
+    pip install --no-cache-dir /tmp/wesense-ingester-core && \
+    pip install --no-cache-dir -r requirements-docker.txt && \
+    apt-get purge -y --auto-remove gcc && \
+    rm -rf /var/lib/apt/lists/* /tmp/wesense-ingester-core
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy application code
+COPY wesense-ingester-wesense/wesense_ingester.py .
 
-# Copy ingester application
-COPY ingester_wesense.py .
-
-# Create proto directory and copy protobuf files
+# Copy protobuf compiled module
 RUN mkdir -p /app/proto
-COPY proto/wesense_homebrew_v2_pb2.py /app/proto/
+COPY wesense-ingester-wesense/proto/wesense_homebrew_v2_pb2.py /app/proto/
 
-# Create utils directory and copy utility modules
-RUN mkdir -p /app/utils
-COPY utils/ /app/utils/
+# Create directories for cache, logs, and config
+RUN mkdir -p /app/cache /app/logs /app/config
 
-# Create config and cache directories
-RUN mkdir -p /app/config /app/logs /app/cache
+ENV TZ=UTC
 
-# Create entrypoint script for PUID/PGID support (LinuxServer.io style)
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Default user (can be overridden with PUID/PGID env vars at runtime)
-ARG USER_UID=1000
-ARG USER_GID=1000
-RUN groupadd -g ${USER_GID} wesense && \
-    useradd -m -u ${USER_UID} -g ${USER_GID} wesense && \
-    chown -R wesense:wesense /app && \
-    chmod -R 755 /app/utils
-
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "ingester_wesense.py", "--config", "/app/config/config.yaml"]
+CMD ["python", "-u", "wesense_ingester.py"]
