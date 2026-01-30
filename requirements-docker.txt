@@ -1,0 +1,10 @@
+# Adapter-specific dependencies for wesense-ingester-wesense
+# Core dependencies (clickhouse-connect, paho-mqtt, reverse_geocoder) are
+# provided by wesense-ingester-core installed separately.
+
+# Protobuf for WeSense v2 format
+protobuf>=5.26.0
+
+# TTN webhook support (optional, only needed if TTN_WEBHOOK_ENABLED=true)
+flask>=2.0.0
+waitress>=2.1.0
