@@ -68,7 +68,8 @@ jobs:
         with:
           context: .
           file: wesense-ingester-wesense/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # No arm/v7: reverse_geocoder requires numpy which has no armv7 wheels
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
