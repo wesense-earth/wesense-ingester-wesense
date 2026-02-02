@@ -26,7 +26,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* /tmp/wesense-ingester-core
 
 # Copy application code
-COPY wesense-ingester-wesense/wesense_ingester.py .
+COPY wesense-ingester-wesense/main.py .
 
 # Copy protobuf compiled module
 RUN mkdir -p /app/proto
@@ -37,4 +37,4 @@ RUN mkdir -p /app/cache /app/logs /app/config
 
 ENV TZ=UTC
 
-CMD ["python", "-u", "wesense_ingester.py"]
+CMD ["python", "-u", "main.py"]
