@@ -748,6 +748,7 @@ class WeSenseIngester:
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
+            self._mqtt_ever_connected = True
             self.logger.info("Connected to MQTT broker")
 
             # Allow custom topic override
@@ -768,7 +769,10 @@ class WeSenseIngester:
 
     def _on_disconnect(self, client, userdata, flags, rc, properties=None):
         if rc != 0:
-            self.logger.warning("Unexpected MQTT disconnection (rc=%s)", rc)
+            if getattr(self, '_mqtt_ever_connected', False):
+                self.logger.warning("Unexpected MQTT disconnection (rc=%s)", rc)
+            else:
+                self.logger.debug("MQTT connection attempt failed (rc=%s), will retry", rc)
 
     def _on_message(self, client, userdata, msg):
         try:
