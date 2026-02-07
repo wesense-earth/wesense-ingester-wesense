@@ -197,6 +197,7 @@ SENSOR_MODEL_MAP = {
     'CM1106C': 'CM1106-C',  # Cubic NDIR CO2 sensor (I2C or UART)
     'TMP117': 'TMP117',     # v2.3 - TI high-precision temperature (±0.1°C)
     'AXP2101': 'AXP2101',   # v2.3 - X-Powers PMU (battery management)
+    'MS5611': 'MS5611',      # v2.4 - TE high-precision barometric pressure
 }
 
 # Board type mapping (v2.3)
