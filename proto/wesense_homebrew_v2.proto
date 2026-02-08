@@ -170,6 +170,7 @@ enum SensorModel {
   CM1106C = 12;               // Cubic CM1106-C NDIR CO2 (I2C or UART)
   TMP117 = 13;                // TI high-precision temperature (±0.1°C)
   AXP2101 = 14;               // X-Powers PMU (battery management)
+  MS5611 = 15;                // TE high-precision barometric pressure
 }
 
 // DeploymentType - Indoor/Outdoor classification
