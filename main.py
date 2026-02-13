@@ -44,6 +44,10 @@ from wesense_ingester import (
 )
 from wesense_ingester.clickhouse.writer import ClickHouseConfig
 from wesense_ingester.mqtt.publisher import MQTTPublisherConfig, WeSensePublisher
+from wesense_ingester.signing.keys import IngesterKeyManager, KeyConfig
+from wesense_ingester.signing.signer import ReadingSigner
+from wesense_ingester.zenoh.config import ZenohConfig
+from wesense_ingester.zenoh.publisher import ZenohPublisher
 
 # Protobuf support
 sys.path.insert(0, str(Path(__file__).parent / "proto"))
@@ -61,13 +65,14 @@ TTN_WEBHOOK_ENABLED = os.getenv("TTN_WEBHOOK_ENABLED", "false").lower() in ("tru
 TTN_WEBHOOK_HOST = os.getenv("TTN_WEBHOOK_HOST", "0.0.0.0")
 TTN_WEBHOOK_PORT = int(os.getenv("TTN_WEBHOOK_PORT", "5000"))
 
-# ClickHouse columns (22-column unified schema)
+# ClickHouse columns (25-column unified schema)
 CLICKHOUSE_COLUMNS = [
     "timestamp", "device_id", "data_source", "network_source", "ingestion_node_id",
     "reading_type", "value", "unit",
     "latitude", "longitude", "altitude", "geo_country", "geo_subdivision",
     "board_model", "sensor_model", "deployment_type", "deployment_type_source",
     "transport_type", "deployment_location", "node_name", "node_info", "node_info_url",
+    "signature", "ingester_id", "key_version",
 ]
 
 # ── Mapping tables ────────────────────────────────────────────────────
@@ -330,6 +335,21 @@ class WeSenseIngester:
         self.publisher = WeSensePublisher(config=mqtt_config)
         self.publisher.connect()
 
+        # Ed25519 signing
+        key_config = KeyConfig.from_env()
+        self.key_manager = IngesterKeyManager(config=key_config)
+        self.key_manager.load_or_generate()
+        self.signer = ReadingSigner(self.key_manager)
+        self.logger.info("Ingester ID: %s (key version %d)", self.key_manager.ingester_id, self.key_manager.key_version)
+
+        # Zenoh publisher (optional, non-blocking)
+        zenoh_config = ZenohConfig.from_env()
+        if zenoh_config.enabled:
+            self.zenoh_publisher = ZenohPublisher(config=zenoh_config, signer=self.signer)
+            self.zenoh_publisher.connect()
+        else:
+            self.zenoh_publisher = None
+
         # LoRa metadata cache
         cache_file = os.getenv("METADATA_CACHE_FILE", "cache/metadata_cache.json")
         os.makedirs(os.path.dirname(cache_file) or ".", exist_ok=True)
@@ -548,6 +568,19 @@ class WeSenseIngester:
             value = round(float(raw_value), decimals)
             reading_timestamp = measurement.get("timestamp", timestamp)
 
+            # Sign the reading for ClickHouse persistence
+            signing_dict = {
+                "device_id": device_id,
+                "data_source": "wesense",
+                "timestamp": reading_timestamp,
+                "reading_type": reading_type,
+                "value": value,
+                "latitude": latitude,
+                "longitude": longitude,
+                "transport_type": "WIFI",
+            }
+            signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
+
             if self.ch_writer:
                 row = (
                     datetime.fromtimestamp(reading_timestamp, tz=timezone.utc),
@@ -572,13 +605,16 @@ class WeSenseIngester:
                     decoded.get("node_name"),
                     decoded.get("node_info"),
                     decoded.get("node_info_url"),
+                    signed.signature.hex(),
+                    self.key_manager.ingester_id,
+                    self.key_manager.key_version,
                 )
                 self.ch_writer.add(row)
 
         self.stats["wifi_readings"] += 1
 
         # Publish to MQTT
-        self.publisher.publish_reading({
+        mqtt_dict = {
             "device_id": device_id,
             "data_source": "wesense",
             "geo_country": geo_country,
@@ -587,7 +623,11 @@ class WeSenseIngester:
             "latitude": latitude,
             "longitude": longitude,
             "transport_type": "WIFI",
-        })
+        }
+        self.publisher.publish_reading(mqtt_dict)
+
+        if self.zenoh_publisher:
+            self.zenoh_publisher.publish_reading(mqtt_dict)
 
         self.logger.info(
             "[%s/%s] Buffered %d WiFi readings from %s",
@@ -677,6 +717,19 @@ class WeSenseIngester:
             decimals = READING_DECIMALS.get(reading_type, 2)
             value = round(float(raw_value), decimals)
 
+            # Sign the reading for ClickHouse persistence
+            signing_dict = {
+                "device_id": device_id,
+                "data_source": "wesense",
+                "timestamp": timestamp,
+                "reading_type": reading_type,
+                "value": value,
+                "latitude": latitude,
+                "longitude": longitude,
+                "transport_type": "LORA",
+            }
+            signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
+
             if self.ch_writer:
                 row = (
                     datetime.fromtimestamp(timestamp, tz=timezone.utc),
@@ -701,13 +754,16 @@ class WeSenseIngester:
                     node_name or None,
                     node_info or None,
                     node_info_url or None,
+                    signed.signature.hex(),
+                    self.key_manager.ingester_id,
+                    self.key_manager.key_version,
                 )
                 self.ch_writer.add(row)
 
         self.stats["lora_readings"] += 1
 
         # Publish to MQTT
-        self.publisher.publish_reading({
+        mqtt_dict = {
             "device_id": device_id,
             "data_source": "wesense",
             "geo_country": geo_country,
@@ -716,7 +772,11 @@ class WeSenseIngester:
             "latitude": latitude,
             "longitude": longitude,
             "transport_type": "LORA",
-        })
+        }
+        self.publisher.publish_reading(mqtt_dict)
+
+        if self.zenoh_publisher:
+            self.zenoh_publisher.publish_reading(mqtt_dict)
 
         self.logger.info(
             "Processed %d LoRa readings from %s (cache %s)",
@@ -953,6 +1013,8 @@ class WeSenseIngester:
         self.logger.info("Shutting down...")
         self.running = False
 
+        if hasattr(self, 'zenoh_publisher') and self.zenoh_publisher:
+            self.zenoh_publisher.close()
         if self.ch_writer:
             self.ch_writer.close()
         if self.mqtt_client:
