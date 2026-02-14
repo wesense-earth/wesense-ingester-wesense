@@ -48,6 +48,7 @@ from wesense_ingester.signing.keys import IngesterKeyManager, KeyConfig
 from wesense_ingester.signing.signer import ReadingSigner
 from wesense_ingester.zenoh.config import ZenohConfig
 from wesense_ingester.zenoh.publisher import ZenohPublisher
+from wesense_ingester.zenoh.queryable import ZenohQueryable
 
 # Protobuf support
 sys.path.insert(0, str(Path(__file__).parent / "proto"))
@@ -342,13 +343,20 @@ class WeSenseIngester:
         self.signer = ReadingSigner(self.key_manager)
         self.logger.info("Ingester ID: %s (key version %d)", self.key_manager.ingester_id, self.key_manager.key_version)
 
-        # Zenoh publisher (optional, non-blocking)
+        # Zenoh publisher + queryable (optional, non-blocking)
         zenoh_config = ZenohConfig.from_env()
         if zenoh_config.enabled:
             self.zenoh_publisher = ZenohPublisher(config=zenoh_config, signer=self.signer)
             self.zenoh_publisher.connect()
+            self.zenoh_queryable = ZenohQueryable(
+                config=zenoh_config,
+                clickhouse_config=ClickHouseConfig.from_env(),
+            )
+            self.zenoh_queryable.connect()
+            self.zenoh_queryable.register("wesense/v2/live/**")
         else:
             self.zenoh_publisher = None
+            self.zenoh_queryable = None
 
         # LoRa metadata cache
         cache_file = os.getenv("METADATA_CACHE_FILE", "cache/metadata_cache.json")
@@ -611,9 +619,31 @@ class WeSenseIngester:
                 )
                 self.ch_writer.add(row)
 
+            # Publish per-measurement to Zenoh (includes reading_type/value)
+            if self.zenoh_publisher:
+                self.zenoh_publisher.publish_reading({
+                    "device_id": device_id,
+                    "data_source": "WESENSE",
+                    "geo_country": geo_country,
+                    "geo_subdivision": geo_subdivision,
+                    "timestamp": reading_timestamp,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "altitude": decoded.get("altitude"),
+                    "transport_type": "WIFI",
+                    "reading_type": reading_type,
+                    "value": value,
+                    "unit": unit,
+                    "sensor_model": sensor_model or "",
+                    "board_model": decoded.get("board_type") or "",
+                    "node_name": decoded.get("node_name"),
+                    "deployment_type": deployment_type,
+                    "network_source": network_source,
+                })
+
         self.stats["wifi_readings"] += 1
 
-        # Publish to MQTT
+        # Publish to MQTT (device-level notification for Respiro map refresh)
         mqtt_dict = {
             "device_id": device_id,
             "data_source": "wesense",
@@ -625,9 +655,6 @@ class WeSenseIngester:
             "transport_type": "WIFI",
         }
         self.publisher.publish_reading(mqtt_dict)
-
-        if self.zenoh_publisher:
-            self.zenoh_publisher.publish_reading(mqtt_dict)
 
         self.logger.info(
             "[%s/%s] Buffered %d WiFi readings from %s",
@@ -760,9 +787,31 @@ class WeSenseIngester:
                 )
                 self.ch_writer.add(row)
 
+            # Publish per-measurement to Zenoh (includes reading_type/value)
+            if self.zenoh_publisher:
+                self.zenoh_publisher.publish_reading({
+                    "device_id": device_id,
+                    "data_source": "WESENSE",
+                    "geo_country": geo_country or "",
+                    "geo_subdivision": geo_subdivision or "",
+                    "timestamp": timestamp,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "altitude": altitude,
+                    "transport_type": "LORA",
+                    "reading_type": reading_type,
+                    "value": value,
+                    "unit": unit,
+                    "sensor_model": sensor_model or "",
+                    "board_model": board_type or "",
+                    "node_name": node_name or None,
+                    "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
+                    "network_source": "wesense/v2/lora",
+                })
+
         self.stats["lora_readings"] += 1
 
-        # Publish to MQTT
+        # Publish to MQTT (device-level notification for Respiro map refresh)
         mqtt_dict = {
             "device_id": device_id,
             "data_source": "wesense",
@@ -774,9 +823,6 @@ class WeSenseIngester:
             "transport_type": "LORA",
         }
         self.publisher.publish_reading(mqtt_dict)
-
-        if self.zenoh_publisher:
-            self.zenoh_publisher.publish_reading(mqtt_dict)
 
         self.logger.info(
             "Processed %d LoRa readings from %s (cache %s)",
@@ -1013,6 +1059,8 @@ class WeSenseIngester:
         self.logger.info("Shutting down...")
         self.running = False
 
+        if hasattr(self, 'zenoh_queryable') and self.zenoh_queryable:
+            self.zenoh_queryable.close()
         if hasattr(self, 'zenoh_publisher') and self.zenoh_publisher:
             self.zenoh_publisher.close()
         if self.ch_writer:
