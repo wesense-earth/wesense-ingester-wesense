@@ -365,12 +365,15 @@ class WeSenseIngester:
         if zenoh_announce and zenoh_announce != announce_addr:
             reg_metadata["zenoh_endpoint_lan"] = f"tcp/{zenoh_announce}:{zenoh_port}"
 
-        self.registry_client.register_node(
-            ingester_id=self.key_manager.ingester_id,
-            public_key_bytes=self.key_manager.public_key_bytes,
-            key_version=self.key_manager.key_version,
-            **reg_metadata,
-        )
+        try:
+            self.registry_client.register_node(
+                ingester_id=self.key_manager.ingester_id,
+                public_key_bytes=self.key_manager.public_key_bytes,
+                key_version=self.key_manager.key_version,
+                **reg_metadata,
+            )
+        except Exception as e:
+            self.logger.warning("OrbitDB registration failed (%s), will retry on next trust sync", e)
         self.registry_client.start_trust_sync()
         self.logger.info("OrbitDB registry — trust sync active")
 
