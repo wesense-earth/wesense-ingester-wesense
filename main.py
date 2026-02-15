@@ -356,20 +356,14 @@ class WeSenseIngester:
         # Build zenoh_endpoint for node registry (WAN + LAN discovery)
         reg_metadata = {}
         announce_addr = os.getenv("ANNOUNCE_ADDRESS", "")
+        zenoh_announce = os.getenv("ZENOH_ANNOUNCE_ADDRESS", "")
         zenoh_port = os.getenv("PORT_ZENOH", "7447")
         if announce_addr:
             reg_metadata["zenoh_endpoint"] = f"tcp/{announce_addr}:{zenoh_port}"
-        # Auto-detect LAN IP for same-network peers (avoids NAT hairpin)
-        try:
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            lan_ip = s.getsockname()[0]
-            s.close()
-            if lan_ip and lan_ip != announce_addr:
-                reg_metadata["zenoh_endpoint_lan"] = f"tcp/{lan_ip}:{zenoh_port}"
-        except Exception:
-            pass
+        # LAN endpoint for same-network peers (avoids NAT hairpin).
+        # ZENOH_ANNOUNCE_ADDRESS is the host's LAN IP, passed from docker-compose.
+        if zenoh_announce and zenoh_announce != announce_addr:
+            reg_metadata["zenoh_endpoint_lan"] = f"tcp/{zenoh_announce}:{zenoh_port}"
 
         self.registry_client.register_node(
             ingester_id=self.key_manager.ingester_id,
