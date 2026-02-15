@@ -658,6 +658,7 @@ class WeSenseIngester:
                 self.zenoh_publisher.publish_reading({
                     "device_id": device_id,
                     "data_source": "WESENSE",
+                    "ingestion_node_id": INGESTION_NODE_ID,
                     "geo_country": geo_country,
                     "geo_subdivision": geo_subdivision,
                     "timestamp": reading_timestamp,
@@ -672,7 +673,10 @@ class WeSenseIngester:
                     "board_model": decoded.get("board_type") or "",
                     "node_name": decoded.get("node_name"),
                     "deployment_type": deployment_type,
+                    "deployment_type_source": deployment_type_source,
                     "network_source": network_source,
+                    "node_info": decoded.get("node_info"),
+                    "node_info_url": decoded.get("node_info_url"),
                 })
 
         self.stats["wifi_readings"] += 1
@@ -826,6 +830,7 @@ class WeSenseIngester:
                 self.zenoh_publisher.publish_reading({
                     "device_id": device_id,
                     "data_source": "WESENSE",
+                    "ingestion_node_id": INGESTION_NODE_ID,
                     "geo_country": geo_country or "",
                     "geo_subdivision": geo_subdivision or "",
                     "timestamp": timestamp,
@@ -840,7 +845,10 @@ class WeSenseIngester:
                     "board_model": board_type or "",
                     "node_name": node_name or None,
                     "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
+                    "deployment_type_source": deployment_type_source,
                     "network_source": "wesense/v2/lora",
+                    "node_info": node_info or None,
+                    "node_info_url": node_info_url or None,
                 })
 
         self.stats["lora_readings"] += 1
