@@ -353,10 +353,18 @@ class WeSenseIngester:
             config=registry_config,
             trust_store=self.trust_store,
         )
+        # Build zenoh_endpoint for node registry (WAN discovery)
+        reg_metadata = {}
+        announce_addr = os.getenv("ANNOUNCE_ADDRESS", "")
+        if announce_addr:
+            zenoh_port = os.getenv("PORT_ZENOH", "7447")
+            reg_metadata["zenoh_endpoint"] = f"tcp/{announce_addr}:{zenoh_port}"
+
         self.registry_client.register_node(
             ingester_id=self.key_manager.ingester_id,
             public_key_bytes=self.key_manager.public_key_bytes,
             key_version=self.key_manager.key_version,
+            **reg_metadata,
         )
         self.registry_client.start_trust_sync()
         self.logger.info("OrbitDB registry — trust sync active")
