@@ -1133,7 +1133,17 @@ class WeSenseIngester:
         self.mqtt_client.on_message = self._on_message
 
         self.logger.info("Connecting to MQTT broker %s:%d", input_broker, input_port)
-        self.mqtt_client.connect(input_broker, input_port, keepalive=60)
+        retry_delay = 5
+        while self.running:
+            try:
+                self.mqtt_client.connect(input_broker, input_port, keepalive=60)
+                break
+            except (ConnectionRefusedError, OSError) as e:
+                self.logger.warning(
+                    "MQTT broker not available (%s), retrying in %ds", e, retry_delay,
+                )
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
         self.mqtt_client.loop_start()
 
         # Start TTN webhook if enabled
