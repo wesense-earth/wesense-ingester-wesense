@@ -766,6 +766,15 @@ class WeSenseIngester:
                 geo_country = geo["geo_country"]
                 geo_subdivision = geo["geo_subdivision"]
 
+        # Skip writing if no location — readings are useless without coordinates.
+        # Location arrives via DeviceMetadataV2 (cached); subsequent readings will have it.
+        if not latitude or not longitude:
+            self.logger.info(
+                "Skipping %d readings from %s — no location yet (waiting for metadata)",
+                len(decoded.get("measurements", [])), device_id,
+            )
+            return
+
         deployment_type_source = (
             "manual" if deployment_type not in ("UNKNOWN", "DEPLOYMENT_UNKNOWN", "") else "unknown"
         )
@@ -805,9 +814,9 @@ class WeSenseIngester:
                     reading_type,
                     value,
                     unit,
-                    float(latitude) if latitude else None,   # Fixed: was 0.0 in old LoRa
-                    float(longitude) if longitude else None,  # Fixed: was 0.0 in old LoRa
-                    float(altitude) if altitude else None,    # Fixed: was 0.0 in old LoRa
+                    float(latitude) if latitude else None,
+                    float(longitude) if longitude else None,
+                    float(altitude) if altitude else None,
                     geo_country or "",
                     geo_subdivision or "",
                     board_type or "",
