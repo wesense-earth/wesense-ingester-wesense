@@ -703,7 +703,7 @@ class WeSenseIngester:
 
     # ── Process LoRa reading ──────────────────────────────────────
 
-    def _process_lora_reading(self, topic: str, payload: bytes):
+    def _process_lora_reading(self, topic: str, payload: bytes, data_source: str = "CHIRPSTACK"):
         """Process a LoRa SensorReadingV2 (merged with cached metadata)."""
         decoded = self._decode_sensor_reading(payload)
         if not decoded:
@@ -785,7 +785,7 @@ class WeSenseIngester:
             # Sign the reading for ClickHouse persistence
             signing_dict = {
                 "device_id": device_id,
-                "data_source": "wesense",
+                "data_source": data_source.lower(),
                 "timestamp": timestamp,
                 "reading_type": reading_type,
                 "value": value,
@@ -799,7 +799,7 @@ class WeSenseIngester:
                 row = (
                     datetime.fromtimestamp(timestamp, tz=timezone.utc),
                     device_id,
-                    "WESENSE",
+                    data_source,
                     "wesense/v2/lora",
                     INGESTION_NODE_ID,
                     reading_type,
@@ -829,7 +829,7 @@ class WeSenseIngester:
             if self.zenoh_publisher:
                 self.zenoh_publisher.publish_reading({
                     "device_id": device_id,
-                    "data_source": "WESENSE",
+                    "data_source": data_source,
                     "ingestion_node_id": INGESTION_NODE_ID,
                     "geo_country": geo_country or "",
                     "geo_subdivision": geo_subdivision or "",
@@ -856,7 +856,7 @@ class WeSenseIngester:
         # Publish to MQTT (device-level notification for Respiro map refresh)
         mqtt_dict = {
             "device_id": device_id,
-            "data_source": "wesense",
+            "data_source": data_source.lower(),
             "geo_country": geo_country,
             "geo_subdivision": geo_subdivision,
             "timestamp": timestamp,
@@ -867,10 +867,11 @@ class WeSenseIngester:
         self.publisher.publish_reading(mqtt_dict)
 
         self.logger.info(
-            "Processed %d LoRa readings from %s (cache %s)",
+            "Processed %d LoRa readings from %s (cache %s, source %s)",
             len(decoded.get("measurements", [])),
             device_id,
             "hit" if cached else "miss",
+            data_source,
         )
 
     # ── Process LoRa metadata ─────────────────────────────────────
@@ -1018,6 +1019,7 @@ class WeSenseIngester:
                     self._process_lora_reading(
                         f"wesense/v2/lora/{topic_device_id}",
                         payload_bytes,
+                        data_source="TTN",
                     )
 
                 self.stats["ttn_uplinks"] += 1
