@@ -613,7 +613,7 @@ class WeSenseIngester:
             # Sign the reading for ClickHouse persistence
             signing_dict = {
                 "device_id": device_id,
-                "data_source": "wesense",
+                "data_source": "WESENSE",
                 "timestamp": reading_timestamp,
                 "reading_type": reading_type,
                 "value": value,
@@ -794,7 +794,7 @@ class WeSenseIngester:
             # Sign the reading for ClickHouse persistence
             signing_dict = {
                 "device_id": device_id,
-                "data_source": data_source.lower(),
+                "data_source": data_source,
                 "timestamp": timestamp,
                 "reading_type": reading_type,
                 "value": value,
