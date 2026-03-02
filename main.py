@@ -8,7 +8,7 @@ Handles all WeSense sensor protocols in a single adapter:
 - TTN Webhook: HTTP POST from The Things Network (optional, TTN_WEBHOOK_ENABLED=true)
 
 Uses wesense-ingester-core for shared infrastructure:
-  - BufferedClickHouseWriter for batched database writes
+  - GatewayClient for batched writes to the storage gateway
   - WeSensePublisher for MQTT output
   - ReverseGeocoder for coordinate-to-location lookup
   - setup_logging for colored console + rotating file logs
@@ -291,7 +291,7 @@ class WeSenseIngester:
     Unified WeSense ingester handling WiFi, LoRa, and TTN webhook inputs.
 
     Uses wesense-ingester-core for shared infrastructure:
-      - BufferedClickHouseWriter for batched database writes
+      - GatewayClient for batched writes to the storage gateway
       - WeSensePublisher for MQTT output
       - ReverseGeocoder for coordinate-to-location lookup
       - setup_logging for colored console + rotating file logs
