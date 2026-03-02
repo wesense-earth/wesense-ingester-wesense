@@ -43,6 +43,8 @@ from wesense_ingester import (
     setup_logging,
 )
 from wesense_ingester.clickhouse.writer import ClickHouseConfig
+from wesense_ingester.gateway.client import GatewayClient
+from wesense_ingester.gateway.config import GatewayConfig
 from wesense_ingester.mqtt.publisher import MQTTPublisherConfig, WeSensePublisher
 from wesense_ingester.signing.keys import IngesterKeyManager, KeyConfig
 from wesense_ingester.signing.signer import ReadingSigner
@@ -317,16 +319,27 @@ class WeSenseIngester:
         # Core components
         self.geocoder = ReverseGeocoder()
 
-        # ClickHouse writer
-        try:
-            self.ch_writer = BufferedClickHouseWriter(
-                config=ClickHouseConfig.from_env(),
-                columns=CLICKHOUSE_COLUMNS,
-            )
-        except Exception as e:
-            self.logger.error("Failed to connect to ClickHouse: %s", e)
-            self.logger.warning("Continuing without ClickHouse (MQTT output only)")
-            self.ch_writer = None
+        # Storage backend: gateway (preferred) or direct ClickHouse
+        self.gateway_client = None
+        self.ch_writer = None
+        gateway_url = os.getenv("GATEWAY_URL")
+        if gateway_url:
+            try:
+                self.gateway_client = GatewayClient(config=GatewayConfig.from_env())
+                self.logger.info("Using storage gateway at %s", gateway_url)
+            except Exception as e:
+                self.logger.error("Failed to create gateway client: %s", e)
+                self.logger.warning("Continuing without storage (MQTT output only)")
+        else:
+            try:
+                self.ch_writer = BufferedClickHouseWriter(
+                    config=ClickHouseConfig.from_env(),
+                    columns=CLICKHOUSE_COLUMNS,
+                )
+            except Exception as e:
+                self.logger.error("Failed to connect to ClickHouse: %s", e)
+                self.logger.warning("Continuing without ClickHouse (MQTT output only)")
+                self.ch_writer = None
 
         # MQTT publisher for decoded output (supports old WESENSE_OUTPUT_* env vars)
         mqtt_config = MQTTPublisherConfig(
@@ -554,6 +567,47 @@ class WeSenseIngester:
         )
         return True
 
+    # ── Storage helpers (gateway or ClickHouse) ─────────────────
+
+    def _write_reading(self, reading_dict: dict) -> None:
+        """Route a reading dict to gateway or ClickHouse."""
+        if self.gateway_client:
+            self.gateway_client.add(reading_dict)
+        elif self.ch_writer:
+            row = self._reading_dict_to_row(reading_dict)
+            self.ch_writer.add(row)
+
+    @staticmethod
+    def _reading_dict_to_row(d: dict) -> tuple:
+        """Convert a ReadingIn-compatible dict to a 25-column CH row tuple."""
+        return (
+            datetime.fromtimestamp(d["timestamp"], tz=timezone.utc),
+            d["device_id"],
+            d.get("data_source", ""),
+            d.get("network_source", ""),
+            d.get("ingestion_node_id", ""),
+            d["reading_type"],
+            d["value"],
+            d.get("unit", ""),
+            d.get("latitude"),
+            d.get("longitude"),
+            d.get("altitude"),
+            d.get("geo_country", ""),
+            d.get("geo_subdivision", ""),
+            d.get("board_model", ""),
+            d.get("sensor_model", ""),
+            d.get("deployment_type", ""),
+            d.get("deployment_type_source", ""),
+            d.get("transport_type", ""),
+            d.get("deployment_location", ""),
+            d.get("node_name"),
+            d.get("node_info"),
+            d.get("node_info_url"),
+            d.get("signature", ""),
+            d.get("ingester_id", ""),
+            d.get("key_version", 0),
+        )
+
     # ── Process WiFi reading ──────────────────────────────────────
 
     def _process_wifi_reading(self, topic: str, payload: bytes):
@@ -623,35 +677,36 @@ class WeSenseIngester:
             }
             signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
 
+            reading_dict = {
+                "timestamp": reading_timestamp,
+                "device_id": device_id,
+                "data_source": "WESENSE",
+                "network_source": network_source,
+                "ingestion_node_id": INGESTION_NODE_ID,
+                "reading_type": reading_type,
+                "value": value,
+                "unit": unit,
+                "latitude": float(latitude) if latitude else None,
+                "longitude": float(longitude) if longitude else None,
+                "altitude": float(decoded["altitude"]) if decoded.get("altitude") else None,
+                "board_model": decoded.get("board_type") or "",
+                "sensor_model": sensor_model or "",
+                "deployment_type": deployment_type,
+                "deployment_type_source": deployment_type_source,
+                "transport_type": "WIFI",
+                "deployment_location": "",
+                "node_name": decoded.get("node_name"),
+                "node_info": decoded.get("node_info"),
+                "node_info_url": decoded.get("node_info_url"),
+                "signature": signed.signature.hex(),
+                "ingester_id": self.key_manager.ingester_id,
+                "key_version": self.key_manager.key_version,
+            }
+            # Gateway mode: omit geo_country/geo_subdivision (gateway geocodes from lat/lon)
             if self.ch_writer:
-                row = (
-                    datetime.fromtimestamp(reading_timestamp, tz=timezone.utc),
-                    device_id,
-                    "WESENSE",
-                    network_source,
-                    INGESTION_NODE_ID,
-                    reading_type,
-                    value,
-                    unit,
-                    float(latitude) if latitude else None,
-                    float(longitude) if longitude else None,
-                    float(decoded["altitude"]) if decoded.get("altitude") else None,
-                    geo_country,
-                    geo_subdivision,
-                    decoded.get("board_type") or "",
-                    sensor_model or "",
-                    deployment_type,
-                    deployment_type_source,
-                    "WIFI",
-                    "",  # deployment_location
-                    decoded.get("node_name"),
-                    decoded.get("node_info"),
-                    decoded.get("node_info_url"),
-                    signed.signature.hex(),
-                    self.key_manager.ingester_id,
-                    self.key_manager.key_version,
-                )
-                self.ch_writer.add(row)
+                reading_dict["geo_country"] = geo_country
+                reading_dict["geo_subdivision"] = geo_subdivision
+            self._write_reading(reading_dict)
 
             # Publish per-measurement to Zenoh (includes reading_type/value)
             if self.zenoh_publisher:
@@ -804,35 +859,36 @@ class WeSenseIngester:
             }
             signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
 
+            reading_dict = {
+                "timestamp": timestamp,
+                "device_id": device_id,
+                "data_source": data_source,
+                "network_source": "wesense/v2/lora",
+                "ingestion_node_id": INGESTION_NODE_ID,
+                "reading_type": reading_type,
+                "value": value,
+                "unit": unit,
+                "latitude": float(latitude) if latitude else None,
+                "longitude": float(longitude) if longitude else None,
+                "altitude": float(altitude) if altitude else None,
+                "board_model": board_type or "",
+                "sensor_model": sensor_model,
+                "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
+                "deployment_type_source": deployment_type_source,
+                "transport_type": "LORA",
+                "deployment_location": "",
+                "node_name": node_name or None,
+                "node_info": node_info or None,
+                "node_info_url": node_info_url or None,
+                "signature": signed.signature.hex(),
+                "ingester_id": self.key_manager.ingester_id,
+                "key_version": self.key_manager.key_version,
+            }
+            # Gateway mode: omit geo_country/geo_subdivision (gateway geocodes from lat/lon)
             if self.ch_writer:
-                row = (
-                    datetime.fromtimestamp(timestamp, tz=timezone.utc),
-                    device_id,
-                    data_source,
-                    "wesense/v2/lora",
-                    INGESTION_NODE_ID,
-                    reading_type,
-                    value,
-                    unit,
-                    float(latitude) if latitude else None,
-                    float(longitude) if longitude else None,
-                    float(altitude) if altitude else None,
-                    geo_country or "",
-                    geo_subdivision or "",
-                    board_type or "",
-                    sensor_model,
-                    deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
-                    deployment_type_source,
-                    "LORA",
-                    "",  # deployment_location
-                    node_name or None,
-                    node_info or None,
-                    node_info_url or None,
-                    signed.signature.hex(),
-                    self.key_manager.ingester_id,
-                    self.key_manager.key_version,
-                )
-                self.ch_writer.add(row)
+                reading_dict["geo_country"] = geo_country or ""
+                reading_dict["geo_subdivision"] = geo_subdivision or ""
+            self._write_reading(reading_dict)
 
             # Publish per-measurement to Zenoh (includes reading_type/value)
             if self.zenoh_publisher:
@@ -1083,17 +1139,18 @@ class WeSenseIngester:
     # ── Stats ─────────────────────────────────────────────────────
 
     def print_stats(self):
-        ch_stats = (
-            self.ch_writer.get_stats()
-            if self.ch_writer
-            else {"total_written": 0, "buffer_size": 0}
-        )
+        if self.gateway_client:
+            storage_stats = self.gateway_client.get_stats()
+        elif self.ch_writer:
+            storage_stats = self.ch_writer.get_stats()
+        else:
+            storage_stats = {"total_written": 0, "buffer_size": 0}
         cache_stats = self.metadata_cache.get_stats()
 
         self.logger.info(
             "STATS | wifi=%d | lora=%d | lora_meta=%d | ttn=%d | "
             "cache_hits=%d | cache_misses=%d | cached_devices=%d | "
-            "ch_written=%d | ch_buffer=%d | future_ts=%d",
+            "written=%d | buffer=%d | future_ts=%d",
             self.stats["wifi_readings"],
             self.stats["lora_readings"],
             self.stats["lora_metadata"],
@@ -1101,8 +1158,8 @@ class WeSenseIngester:
             self.stats["cache_hits"],
             self.stats["cache_misses"],
             cache_stats["total_devices"],
-            ch_stats["total_written"],
-            ch_stats["buffer_size"],
+            storage_stats["total_written"],
+            storage_stats["buffer_size"],
             self.stats["future_timestamps"],
         )
 
@@ -1118,6 +1175,8 @@ class WeSenseIngester:
             self.zenoh_publisher.close()
         if hasattr(self, 'registry_client'):
             self.registry_client.close()
+        if self.gateway_client:
+            self.gateway_client.close()
         if self.ch_writer:
             self.ch_writer.close()
         if self.mqtt_client:
