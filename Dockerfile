@@ -32,9 +32,13 @@ COPY wesense-ingester-wesense/main.py .
 RUN mkdir -p /app/proto
 COPY wesense-ingester-wesense/proto/wesense_homebrew_v2_pb2.py /app/proto/
 
+# Copy entrypoint
+COPY wesense-ingester-wesense/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # Create directories for cache, logs, and config
 RUN mkdir -p /app/cache /app/logs /app/config
 
 ENV TZ=UTC
 
-CMD ["python", "-u", "main.py"]
+ENTRYPOINT ["/app/entrypoint.sh"]
