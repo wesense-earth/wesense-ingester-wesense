@@ -961,6 +961,9 @@ class WeSenseIngester:
 
         app = Flask("ttn_webhook")
         app.logger.setLevel(logging.WARNING)
+        app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1MB — TTN payloads are tiny
+
+        MAX_BASE64_PAYLOAD = 10_000  # ~7.5KB decoded — sensor readings are <1KB
 
         @app.route("/health", methods=["GET"])
         def health():
@@ -997,7 +1000,13 @@ class WeSenseIngester:
                 if not frm_payload_b64:
                     return jsonify({"status": "ok", "message": "No payload"}), 200
 
-                payload_bytes = base64.b64decode(frm_payload_b64)
+                if not isinstance(frm_payload_b64, str) or len(frm_payload_b64) > MAX_BASE64_PAYLOAD:
+                    return jsonify({"error": "Payload too large"}), 400
+
+                try:
+                    payload_bytes = base64.b64decode(frm_payload_b64)
+                except Exception:
+                    return jsonify({"error": "Invalid base64"}), 400
 
                 # Build topic-style device ID
                 topic_device_id = (
@@ -1030,7 +1039,7 @@ class WeSenseIngester:
 
             except Exception as e:
                 self.logger.error("Error processing TTN uplink: %s", e)
-                return jsonify({"error": str(e)}), 500
+                return jsonify({"error": "Internal processing error"}), 500
 
         @app.route("/ttn/join", methods=["POST"])
         def ttn_join():
@@ -1053,7 +1062,15 @@ class WeSenseIngester:
                     "TTN webhook server starting on %s:%d (waitress)",
                     TTN_WEBHOOK_HOST, TTN_WEBHOOK_PORT,
                 )
-                serve(app, host=TTN_WEBHOOK_HOST, port=TTN_WEBHOOK_PORT, _quiet=True)
+                serve(
+                    app,
+                    host=TTN_WEBHOOK_HOST,
+                    port=TTN_WEBHOOK_PORT,
+                    _quiet=True,
+                    channel_timeout=30,
+                    connection_limit=100,
+                    recv_bytes=65536,
+                )
             except ImportError:
                 self.logger.info(
                     "TTN webhook server starting on %s:%d (flask dev server)",
