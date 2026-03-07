@@ -1093,6 +1093,17 @@ class WeSenseIngester:
         )
         cache_stats = self.metadata_cache.get_stats()
 
+        # Resource telemetry — diagnose memory pressure from logs after a crash
+        import resource
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # macOS=bytes, Linux=KB
+        # On Linux ru_maxrss is in KB; on macOS it's in bytes
+        if sys.platform == "darwin":
+            rss_mb = rss_mb / 1024
+        self.logger.info(
+            "RESOURCES | rss=%.0fMB | threads=%d",
+            rss_mb, threading.active_count(),
+        )
+
         self.logger.info(
             "STATS | wifi=%d | lora=%d | lora_meta=%d | ttn=%d | "
             "cache_hits=%d | cache_misses=%d | cached_devices=%d | "
