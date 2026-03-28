@@ -264,12 +264,12 @@ DEPLOYMENT_TYPE_MAP = {
 
 # Transport type mapping
 TRANSPORT_TYPE_MAP = {
-    'TRANSPORT_UNKNOWN': 'UNKNOWN',
-    'WIFI_MQTT': 'WIFI',
-    'LORAWAN': 'LORA',
-    'TRANSPORT_MESHTASTIC': 'MESHTASTIC',
-    'CELLULAR': 'CELLULAR',
-    'SATELLITE': 'SATELLITE',
+    'TRANSPORT_UNKNOWN': 'unknown',
+    'WIFI_MQTT': 'wifi',
+    'LORAWAN': 'lorawan',
+    'TRANSPORT_MESHTASTIC': 'meshtastic',
+    'CELLULAR': 'cellular',
+    'SATELLITE': 'satellite',
 }
 
 # =====================================================================
@@ -295,7 +295,7 @@ def flush_clickhouse_buffer():
     try:
         # Column names matching the sensor_readings schema
         columns = [
-            'timestamp', 'device_id', 'data_source', 'network_source', 'ingestion_node_id',
+            'timestamp', 'device_id', 'data_source', 'data_source_name', 'network_source', 'ingestion_node_id',
             'reading_type', 'value', 'unit',
             'latitude', 'longitude', 'altitude', 'geo_country', 'geo_subdivision',
             'board_model', 'sensor_model', 'deployment_type', 'deployment_type_source',
@@ -448,7 +448,7 @@ class ProtobufDecoder:
                 # Device info
                 'device_id': f"wesense_{msg.device_id:016x}",
                 'device_id_hex': f"0x{msg.device_id:016X}",
-                'data_source': 'WESENSE',
+                'data_source': 'wesense',
 
                 # Temporal
                 'timestamp': msg.timestamp,
@@ -471,7 +471,7 @@ class ProtobufDecoder:
 
                 # Deployment context (transport_type inferred from topic, not message)
                 'deployment_type': DEPLOYMENT_TYPE_MAP.get(deployment_type_name, 'UNKNOWN'),
-                'transport_type': 'WIFI',  # This ingester only handles WiFi
+                'transport_type': 'wifi',  # This ingester only handles WiFi
 
                 # All sensor measurements
                 'measurements': measurements,
@@ -598,7 +598,7 @@ class MQTTInputHandler:
 
         # Format: wesense/v2/wifi/{country}/{subdivision}/{device_id}
         if len(topic_parts) >= 6 and topic_parts[0] == 'wesense' and topic_parts[2] == 'wifi':
-            network_source = "wesense/v2/wifi"
+            network_source = "mqtt"
             # Use geocoded values if available, otherwise fall back to topic
             if not geo_country:
                 geo_country = topic_parts[3].upper()
@@ -606,13 +606,13 @@ class MQTTInputHandler:
                 geo_subdivision = topic_parts[4]
         # Legacy format: wesense/v2/{country}/{subdivision}/{device_id}
         elif len(topic_parts) >= 5 and topic_parts[0] == 'wesense' and topic_parts[1] in ('v1', 'v2'):
-            network_source = f"{topic_parts[0]}/{topic_parts[1]}"
+            network_source = "mqtt"
             if not geo_country:
                 geo_country = topic_parts[2].upper()
             if not geo_subdivision:
                 geo_subdivision = topic_parts[3]
         else:
-            network_source = topic
+            network_source = "mqtt"
 
         # Write each measurement to ClickHouse
         if clickhouse_client:
@@ -647,7 +647,7 @@ class MQTTInputHandler:
             # WeSense sensors have deployment_type set in firmware config, so source is 'manual'
             # If deployment_type is UNKNOWN, source should also be 'unknown'
             deployment_type_source = 'manual' if deployment_type != 'UNKNOWN' else 'unknown'
-            transport_type = decoded.get('transport_type', 'WIFI')
+            transport_type = decoded.get('transport_type', 'wifi')
             altitude = decoded.get('altitude')
             board_type = decoded.get('board_type') or ''
             node_name = decoded.get('node_name')
@@ -672,7 +672,8 @@ class MQTTInputHandler:
                 row = (
                     datetime.fromtimestamp(reading_timestamp, tz=timezone.utc),  # timestamp
                     device_id,                    # device_id
-                    'WESENSE',                    # data_source
+                    'wesense',                    # data_source
+                    'WeSense',                    # data_source_name
                     network_source,               # network_source
                     INGESTION_NODE_ID,            # ingestion_node_id
                     reading_type,                 # reading_type
