@@ -47,9 +47,6 @@ from wesense_ingester.gateway.config import GatewayConfig
 from wesense_ingester.mqtt.publisher import MQTTPublisherConfig, WeSensePublisher
 from wesense_ingester.signing.keys import IngesterKeyManager, KeyConfig
 from wesense_ingester.signing.signer import ReadingSigner
-from wesense_ingester.zenoh.config import ZenohConfig
-from wesense_ingester.zenoh.publisher import ZenohPublisher
-from wesense_ingester.zenoh.queryable import ZenohQueryable
 from wesense_ingester.registry.config import RegistryConfig
 from wesense_ingester.registry.client import RegistryClient
 from wesense_ingester.signing.trust import TrustStore
@@ -341,44 +338,16 @@ class WeSenseIngester:
             config=registry_config,
             trust_store=self.trust_store,
         )
-        # Build zenoh_endpoint for node registry (WAN + LAN discovery)
-        reg_metadata = {}
-        announce_addr = os.getenv("ANNOUNCE_ADDRESS", "")
-        zenoh_announce = os.getenv("ZENOH_ANNOUNCE_ADDRESS", "")
-        zenoh_port = os.getenv("PORT_ZENOH", "7447")
-        if announce_addr:
-            reg_metadata["zenoh_endpoint"] = f"tcp/{announce_addr}:{zenoh_port}"
-        # LAN endpoint for same-network peers (avoids NAT hairpin).
-        # ZENOH_ANNOUNCE_ADDRESS is the host's LAN IP, passed from docker-compose.
-        if zenoh_announce and zenoh_announce != announce_addr:
-            reg_metadata["zenoh_endpoint_lan"] = f"tcp/{zenoh_announce}:{zenoh_port}"
-
         try:
             self.registry_client.register_node(
                 ingester_id=self.key_manager.ingester_id,
                 public_key_bytes=self.key_manager.public_key_bytes,
                 key_version=self.key_manager.key_version,
-                **reg_metadata,
             )
         except Exception as e:
             self.logger.warning("OrbitDB registration failed (%s), will retry on next trust sync", e)
         self.registry_client.start_trust_sync()
         self.logger.info("OrbitDB registry — trust sync active")
-
-        # Zenoh publisher + queryable (optional, non-blocking)
-        zenoh_config = ZenohConfig.from_env()
-        if zenoh_config.enabled:
-            self.zenoh_publisher = ZenohPublisher(config=zenoh_config, signer=self.signer)
-            self.zenoh_publisher.connect()
-            self.zenoh_queryable = ZenohQueryable(
-                config=zenoh_config,
-                clickhouse_config=ClickHouseConfig.from_env(),
-            )
-            self.zenoh_queryable.connect()
-            self.zenoh_queryable.register("wesense/v2/live/**")
-        else:
-            self.zenoh_publisher = None
-            self.zenoh_queryable = None
 
         # LoRa metadata cache
         cache_file = os.getenv("METADATA_CACHE_FILE", "cache/metadata_cache.json")
@@ -633,33 +602,6 @@ class WeSenseIngester:
                     "key_version": self.key_manager.key_version,
                 })
 
-            # Publish per-measurement to Zenoh (includes reading_type/value)
-            if self.zenoh_publisher:
-                self.zenoh_publisher.publish_reading({
-                    "device_id": device_id,
-                    "data_source": "wesense",
-                    "data_source_name": "WeSense",
-                    "ingestion_node_id": INGESTION_NODE_ID,
-                    "geo_country": geo_country,
-                    "geo_subdivision": geo_subdivision,
-                    "timestamp": reading_timestamp,
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "altitude": decoded.get("altitude"),
-                    "transport_type": "wifi",
-                    "reading_type": reading_type,
-                    "value": value,
-                    "unit": unit,
-                    "sensor_model": sensor_model or "",
-                    "board_model": decoded.get("board_type") or "",
-                    "node_name": decoded.get("node_name") or "",
-                    "deployment_type": deployment_type,
-                    "deployment_type_source": deployment_type_source,
-                    "network_source": "mqtt",
-                    "node_info": decoded.get("node_info") or "",
-                    "node_info_url": decoded.get("node_info_url") or "",
-                })
-
         self.stats["wifi_readings"] += 1
 
         # Publish to MQTT (device-level notification for Respiro map refresh)
@@ -814,33 +756,6 @@ class WeSenseIngester:
                     "signature": signed.signature.hex(),
                     "ingester_id": self.key_manager.ingester_id,
                     "key_version": self.key_manager.key_version,
-                })
-
-            # Publish per-measurement to Zenoh (includes reading_type/value)
-            if self.zenoh_publisher:
-                self.zenoh_publisher.publish_reading({
-                    "device_id": device_id,
-                    "data_source": "wesense",
-                    "data_source_name": "WeSense",
-                    "ingestion_node_id": INGESTION_NODE_ID,
-                    "geo_country": geo_country or "",
-                    "geo_subdivision": geo_subdivision or "",
-                    "timestamp": timestamp,
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "altitude": altitude,
-                    "transport_type": "lorawan",
-                    "reading_type": reading_type,
-                    "value": value,
-                    "unit": unit,
-                    "sensor_model": sensor_model or "",
-                    "board_model": board_type or "",
-                    "node_name": node_name or None,
-                    "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
-                    "deployment_type_source": deployment_type_source,
-                    "network_source": network_source,
-                    "node_info": node_info or None,
-                    "node_info_url": node_info_url or None,
                 })
 
         self.stats["lora_readings"] += 1
@@ -1124,10 +1039,6 @@ class WeSenseIngester:
         self.logger.info("Shutting down...")
         self.running = False
 
-        if hasattr(self, 'zenoh_queryable') and self.zenoh_queryable:
-            self.zenoh_queryable.close()
-        if hasattr(self, 'zenoh_publisher') and self.zenoh_publisher:
-            self.zenoh_publisher.close()
         if hasattr(self, 'registry_client'):
             self.registry_client.close()
         if self.gateway_client:
