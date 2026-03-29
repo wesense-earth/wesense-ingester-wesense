@@ -578,14 +578,6 @@ class WeSenseIngester:
                 geo_country = topic_parts[2].lower()
                 geo_subdivision = topic_parts[3]
 
-        # Determine network source from topic
-        if len(topic_parts) >= 3 and topic_parts[2] == "wifi":
-            network_source = "wesense/v2/wifi"
-        elif len(topic_parts) >= 2:
-            network_source = f"{topic_parts[0]}/{topic_parts[1]}"
-        else:
-            network_source = topic
-
         deployment_type = decoded.get("deployment_type", "UNKNOWN")
         deployment_type_source = "manual" if deployment_type != "UNKNOWN" else "unknown"
 
@@ -601,13 +593,13 @@ class WeSenseIngester:
             # Sign the reading for ClickHouse persistence
             signing_dict = {
                 "device_id": device_id,
-                "data_source": "WESENSE",
+                "data_source": "wesense",
                 "timestamp": reading_timestamp,
                 "reading_type": reading_type,
                 "value": value,
                 "latitude": latitude,
                 "longitude": longitude,
-                "transport_type": "WIFI",
+                "transport_type": "wifi",
             }
             signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
 
@@ -615,8 +607,9 @@ class WeSenseIngester:
                 self.gateway_client.add({
                     "timestamp": reading_timestamp,
                     "device_id": device_id,
-                    "data_source": "WESENSE",
-                    "network_source": network_source,
+                    "data_source": "wesense",
+                    "data_source_name": "WeSense",
+                    "network_source": "mqtt",
                     "ingestion_node_id": INGESTION_NODE_ID,
                     "reading_type": reading_type,
                     "value": value,
@@ -630,7 +623,7 @@ class WeSenseIngester:
                     "sensor_model": sensor_model or "",
                     "deployment_type": deployment_type,
                     "deployment_type_source": deployment_type_source,
-                    "transport_type": "WIFI",
+                    "transport_type": "wifi",
                     "deployment_location": "",
                     "node_name": decoded.get("node_name") or "",
                     "node_info": decoded.get("node_info") or "",
@@ -644,7 +637,8 @@ class WeSenseIngester:
             if self.zenoh_publisher:
                 self.zenoh_publisher.publish_reading({
                     "device_id": device_id,
-                    "data_source": "WESENSE",
+                    "data_source": "wesense",
+                    "data_source_name": "WeSense",
                     "ingestion_node_id": INGESTION_NODE_ID,
                     "geo_country": geo_country,
                     "geo_subdivision": geo_subdivision,
@@ -652,7 +646,7 @@ class WeSenseIngester:
                     "latitude": latitude,
                     "longitude": longitude,
                     "altitude": decoded.get("altitude"),
-                    "transport_type": "WIFI",
+                    "transport_type": "wifi",
                     "reading_type": reading_type,
                     "value": value,
                     "unit": unit,
@@ -661,7 +655,7 @@ class WeSenseIngester:
                     "node_name": decoded.get("node_name") or "",
                     "deployment_type": deployment_type,
                     "deployment_type_source": deployment_type_source,
-                    "network_source": network_source,
+                    "network_source": "mqtt",
                     "node_info": decoded.get("node_info") or "",
                     "node_info_url": decoded.get("node_info_url") or "",
                 })
@@ -672,12 +666,13 @@ class WeSenseIngester:
         mqtt_dict = {
             "device_id": device_id,
             "data_source": "wesense",
+            "data_source_name": "WeSense",
             "geo_country": geo_country,
             "geo_subdivision": geo_subdivision,
             "timestamp": timestamp,
             "latitude": latitude,
             "longitude": longitude,
-            "transport_type": "WIFI",
+            "transport_type": "wifi",
         }
         self.publisher.publish_reading(mqtt_dict)
 
@@ -690,7 +685,7 @@ class WeSenseIngester:
 
     # ── Process LoRa reading ──────────────────────────────────────
 
-    def _process_lora_reading(self, topic: str, payload: bytes, data_source: str = "CHIRPSTACK"):
+    def _process_lora_reading(self, topic: str, payload: bytes, network_source: str = "chirpstack"):
         """Process a LoRa SensorReadingV2 (merged with cached metadata)."""
         decoded = self._decode_sensor_reading(payload)
         if not decoded:
@@ -781,13 +776,13 @@ class WeSenseIngester:
             # Sign the reading for ClickHouse persistence
             signing_dict = {
                 "device_id": device_id,
-                "data_source": data_source,
+                "data_source": "wesense",
                 "timestamp": timestamp,
                 "reading_type": reading_type,
                 "value": value,
                 "latitude": latitude,
                 "longitude": longitude,
-                "transport_type": "LORA",
+                "transport_type": "lorawan",
             }
             signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
 
@@ -795,8 +790,9 @@ class WeSenseIngester:
                 self.gateway_client.add({
                     "timestamp": timestamp,
                     "device_id": device_id,
-                    "data_source": data_source,
-                    "network_source": "wesense/v2/lora",
+                    "data_source": "wesense",
+                    "data_source_name": "WeSense",
+                    "network_source": network_source,
                     "ingestion_node_id": INGESTION_NODE_ID,
                     "reading_type": reading_type,
                     "value": value,
@@ -810,7 +806,7 @@ class WeSenseIngester:
                     "sensor_model": sensor_model or "",
                     "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
                     "deployment_type_source": deployment_type_source,
-                    "transport_type": "LORA",
+                    "transport_type": "lorawan",
                     "deployment_location": "",
                     "node_name": node_name or "",
                     "node_info": node_info or "",
@@ -824,7 +820,8 @@ class WeSenseIngester:
             if self.zenoh_publisher:
                 self.zenoh_publisher.publish_reading({
                     "device_id": device_id,
-                    "data_source": data_source,
+                    "data_source": "wesense",
+                    "data_source_name": "WeSense",
                     "ingestion_node_id": INGESTION_NODE_ID,
                     "geo_country": geo_country or "",
                     "geo_subdivision": geo_subdivision or "",
@@ -832,7 +829,7 @@ class WeSenseIngester:
                     "latitude": latitude,
                     "longitude": longitude,
                     "altitude": altitude,
-                    "transport_type": "LORA",
+                    "transport_type": "lorawan",
                     "reading_type": reading_type,
                     "value": value,
                     "unit": unit,
@@ -841,7 +838,7 @@ class WeSenseIngester:
                     "node_name": node_name or None,
                     "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
                     "deployment_type_source": deployment_type_source,
-                    "network_source": "wesense/v2/lora",
+                    "network_source": network_source,
                     "node_info": node_info or None,
                     "node_info_url": node_info_url or None,
                 })
@@ -851,22 +848,23 @@ class WeSenseIngester:
         # Publish to MQTT (device-level notification for Respiro map refresh)
         mqtt_dict = {
             "device_id": device_id,
-            "data_source": data_source.lower(),
+            "data_source": "wesense",
+            "data_source_name": "WeSense",
             "geo_country": geo_country,
             "geo_subdivision": geo_subdivision,
             "timestamp": timestamp,
             "latitude": latitude,
             "longitude": longitude,
-            "transport_type": "LORA",
+            "transport_type": "lorawan",
         }
         self.publisher.publish_reading(mqtt_dict)
 
         self.logger.info(
-            "Processed %d LoRa readings from %s (cache %s, source %s)",
+            "Processed %d LoRa readings from %s (cache %s, network %s)",
             len(decoded.get("measurements", [])),
             device_id,
             "hit" if cached else "miss",
-            data_source,
+            network_source,
         )
 
     # ── Process LoRa metadata ─────────────────────────────────────
@@ -1023,7 +1021,7 @@ class WeSenseIngester:
                     self._process_lora_reading(
                         f"wesense/v2/lora/{topic_device_id}",
                         payload_bytes,
-                        data_source="TTN",
+                        network_source="ttn",
                     )
 
                 self.stats["ttn_uplinks"] += 1
