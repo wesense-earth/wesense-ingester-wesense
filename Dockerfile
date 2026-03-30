@@ -13,7 +13,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy dependency files first for better layer caching
+# Bust cache when ingester-core or app code changes
+ARG CACHE_BUST=1
+
 COPY wesense-ingester-core/ /tmp/wesense-ingester-core/
 COPY wesense-ingester-wesense/requirements-docker.txt .
 
@@ -24,9 +26,6 @@ RUN apt-get update && \
     pip install --no-cache-dir -r requirements-docker.txt && \
     apt-get purge -y --auto-remove gcc && \
     rm -rf /var/lib/apt/lists/* /tmp/wesense-ingester-core
-
-# Bust cache for application code on every CI build
-ARG CACHE_BUST=1
 
 # Copy application code
 COPY wesense-ingester-wesense/main.py .
