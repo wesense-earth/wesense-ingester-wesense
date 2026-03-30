@@ -602,21 +602,30 @@ class WeSenseIngester:
                     "key_version": self.key_manager.key_version,
                 })
 
-        self.stats["wifi_readings"] += 1
+            # Publish per-reading to MQTT for P2P distribution via zenoh-bridge
+            mqtt_dict = {
+                "timestamp": reading_timestamp,
+                "device_id": device_id,
+                "data_source": "wesense",
+                "data_source_name": "WeSense",
+                "reading_type": reading_type,
+                "value": value,
+                "unit": unit,
+                "latitude": latitude,
+                "longitude": longitude,
+                "altitude": decoded.get("altitude"),
+                "geo_country": geo_country,
+                "geo_subdivision": geo_subdivision,
+                "board_model": decoded.get("board_type") or "",
+                "sensor_model": sensor_model or "",
+                "deployment_type": deployment_type,
+                "deployment_type_source": deployment_type_source,
+                "transport_type": "wifi",
+                "node_name": decoded.get("node_name") or "",
+            }
+            self.publisher.publish_reading(mqtt_dict)
 
-        # Publish to MQTT (device-level notification for Respiro map refresh)
-        mqtt_dict = {
-            "device_id": device_id,
-            "data_source": "wesense",
-            "data_source_name": "WeSense",
-            "geo_country": geo_country,
-            "geo_subdivision": geo_subdivision,
-            "timestamp": timestamp,
-            "latitude": latitude,
-            "longitude": longitude,
-            "transport_type": "wifi",
-        }
-        self.publisher.publish_reading(mqtt_dict)
+        self.stats["wifi_readings"] += 1
 
         self.logger.info(
             "[%s/%s] Buffered %d WiFi readings from %s",
@@ -758,21 +767,30 @@ class WeSenseIngester:
                     "key_version": self.key_manager.key_version,
                 })
 
-        self.stats["lora_readings"] += 1
+            # Publish per-reading to MQTT for P2P distribution via zenoh-bridge
+            mqtt_dict = {
+                "timestamp": timestamp,
+                "device_id": device_id,
+                "data_source": "wesense",
+                "data_source_name": "WeSense",
+                "reading_type": reading_type,
+                "value": value,
+                "unit": unit,
+                "latitude": latitude,
+                "longitude": longitude,
+                "altitude": altitude,
+                "geo_country": geo_country,
+                "geo_subdivision": geo_subdivision,
+                "board_model": board_type or "",
+                "sensor_model": sensor_model or "",
+                "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
+                "deployment_type_source": deployment_type_source,
+                "transport_type": "lorawan",
+                "node_name": node_name or "",
+            }
+            self.publisher.publish_reading(mqtt_dict)
 
-        # Publish to MQTT (device-level notification for Respiro map refresh)
-        mqtt_dict = {
-            "device_id": device_id,
-            "data_source": "wesense",
-            "data_source_name": "WeSense",
-            "geo_country": geo_country,
-            "geo_subdivision": geo_subdivision,
-            "timestamp": timestamp,
-            "latitude": latitude,
-            "longitude": longitude,
-            "transport_type": "lorawan",
-        }
-        self.publisher.publish_reading(mqtt_dict)
+        self.stats["lora_readings"] += 1
 
         self.logger.info(
             "Processed %d LoRa readings from %s (cache %s, network %s)",
