@@ -25,6 +25,9 @@ RUN apt-get update && \
     apt-get purge -y --auto-remove gcc && \
     rm -rf /var/lib/apt/lists/* /tmp/wesense-ingester-core
 
+# Bust cache for application code on every CI build
+ARG CACHE_BUST=1
+
 # Copy application code
 COPY wesense-ingester-wesense/main.py .
 
