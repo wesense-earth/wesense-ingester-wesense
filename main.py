@@ -7,10 +7,8 @@ Handles all WeSense sensor protocols in a single adapter:
 - LoRa: Split SensorReadingV2 + DeviceMetadataV2 via MQTT (wesense/v2/lora/#)
 - TTN Webhook: HTTP POST from The Things Network (optional, TTN_WEBHOOK_ENABLED=true)
 
-Uses wesense-ingester-core for shared infrastructure:
-  - GatewayClient for batched writes to the storage gateway
-  - WeSensePublisher for MQTT output
-  - ReverseGeocoder for coordinate-to-location lookup
+Uses wesense-ingester-core ReadingPipeline for shared infrastructure:
+  - Geocoding, Ed25519 signing, MQTT publishing, storage gateway
   - setup_logging for colored console + rotating file logs
 
 Replaces the separate wesense-ingester-wesense (WiFi),
@@ -37,16 +35,8 @@ from typing import Any, Dict, Optional
 
 import paho.mqtt.client as mqtt
 
-from wesense_ingester import (
-    ReverseGeocoder,
-    setup_logging,
-)
-from wesense_ingester.clickhouse.writer import ClickHouseConfig
-from wesense_ingester.gateway.client import GatewayClient
-from wesense_ingester.gateway.config import GatewayConfig
-from wesense_ingester.mqtt.publisher import MQTTPublisherConfig, WeSensePublisher, configure_mqtt_tls
-from wesense_ingester.signing.keys import IngesterKeyManager, KeyConfig
-from wesense_ingester.signing.signer import ReadingSigner
+from wesense_ingester import ReadingPipeline, setup_logging
+from wesense_ingester.mqtt.publisher import MQTTPublisherConfig, configure_mqtt_tls
 from wesense_ingester.registry.config import RegistryConfig
 from wesense_ingester.registry.client import RegistryClient
 from wesense_ingester.signing.trust import TrustStore
@@ -57,7 +47,6 @@ import wesense_homebrew_v2_pb2 as proto  # noqa: E402
 
 # ── Configuration ─────────────────────────────────────────────────────
 
-INGESTION_NODE_ID = os.getenv("INGESTION_NODE_ID", "wesense-ingester-1")
 FUTURE_TIMESTAMP_TOLERANCE = 30  # seconds
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 STATS_INTERVAL = int(os.getenv("STATS_INTERVAL", "60"))
@@ -287,11 +276,10 @@ class WeSenseIngester:
     """
     Unified WeSense ingester handling WiFi, LoRa, and TTN webhook inputs.
 
-    Uses wesense-ingester-core for shared infrastructure:
-      - GatewayClient for batched writes to the storage gateway
-      - WeSensePublisher for MQTT output
-      - ReverseGeocoder for coordinate-to-location lookup
-      - setup_logging for colored console + rotating file logs
+    Uses wesense-ingester-core ReadingPipeline for geocoding, Ed25519 signing,
+    MQTT publishing, and storage gateway writes. This adapter only implements
+    WeSense-specific logic: protobuf decoding, LoRa metadata caching, topic
+    routing, and TTN webhook HTTP receiver.
     """
 
     def __init__(self):
@@ -302,18 +290,7 @@ class WeSenseIngester:
         )
         self.ft_logger = logging.getLogger("wesense_ingester.future_timestamps")
 
-        # Core components
-        self.geocoder = ReverseGeocoder()
-
-        # Storage gateway
-        self.gateway_client = None
-        try:
-            self.gateway_client = GatewayClient(config=GatewayConfig.from_env())
-        except Exception as e:
-            self.logger.error("Failed to create gateway client: %s", e)
-            self.logger.warning("Continuing without storage (MQTT output only)")
-
-        # MQTT publisher for decoded output
+        # Reading pipeline — handles geocoding, signing, MQTT publish, gateway POST
         mqtt_config = MQTTPublisherConfig(
             broker=os.getenv("WESENSE_OUTPUT_BROKER", "localhost"),
             port=int(os.getenv("WESENSE_OUTPUT_PORT", "1883")),
@@ -323,15 +300,9 @@ class WeSenseIngester:
             use_tls=os.getenv("MQTT_USE_TLS", "").lower() in ("true", "1", "yes"),
             ca_certfile=os.getenv("TLS_CA_CERTFILE"),
         )
-        self.publisher = WeSensePublisher(config=mqtt_config)
-        self.publisher.connect()
-
-        # Ed25519 signing
-        key_config = KeyConfig.from_env()
-        self.key_manager = IngesterKeyManager(config=key_config)
-        self.key_manager.load_or_generate()
-        self.signer = ReadingSigner(self.key_manager)
-        self.logger.info("Ingester ID: %s (key version %d)", self.key_manager.ingester_id, self.key_manager.key_version)
+        self.pipeline = ReadingPipeline(
+            name="wesense", mqtt_config=mqtt_config, enable_dedup=False,
+        )
 
         # OrbitDB registry — node registration + trust sync
         self.trust_store = TrustStore()
@@ -342,9 +313,9 @@ class WeSenseIngester:
         )
         try:
             self.registry_client.register_node(
-                ingester_id=self.key_manager.ingester_id,
-                public_key_bytes=self.key_manager.public_key_bytes,
-                key_version=self.key_manager.key_version,
+                ingester_id=self.pipeline.ingester_id,
+                public_key_bytes=self.pipeline.key_manager.public_key_bytes,
+                key_version=self.pipeline.key_manager.key_version,
             )
         except Exception as e:
             self.logger.warning("OrbitDB registration failed (%s), will retry on next trust sync", e)
@@ -468,7 +439,7 @@ class WeSenseIngester:
 
             # Geocode if we have location
             if metadata["latitude"] and metadata["longitude"]:
-                geo = self.geocoder.reverse_geocode(
+                geo = self.pipeline.geocoder.reverse_geocode(
                     metadata["latitude"], metadata["longitude"]
                 )
                 if geo:
@@ -534,7 +505,7 @@ class WeSenseIngester:
         geo_country = ""
         geo_subdivision = ""
         if latitude and longitude:
-            geo = self.geocoder.reverse_geocode(latitude, longitude)
+            geo = self.pipeline.geocoder.reverse_geocode(latitude, longitude)
             if geo:
                 geo_country = geo["geo_country"]
                 geo_subdivision = geo["geo_subdivision"]
@@ -561,71 +532,30 @@ class WeSenseIngester:
             value = round(float(raw_value), decimals)
             reading_timestamp = measurement.get("timestamp", timestamp)
 
-            # Sign the reading for ClickHouse persistence
-            signing_dict = {
+            self.pipeline.process({
                 "device_id": device_id,
-                "data_source": "wesense",
                 "timestamp": reading_timestamp,
-                "reading_type": reading_type,
-                "value": value,
-                "latitude": latitude,
-                "longitude": longitude,
-                "transport_type": "wifi",
-            }
-            signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
-
-            if self.gateway_client:
-                self.gateway_client.add({
-                    "timestamp": reading_timestamp,
-                    "device_id": device_id,
-                    "data_source": "wesense",
-                    "data_source_name": "WeSense",
-                    "network_source": "mqtt",
-                    "ingestion_node_id": INGESTION_NODE_ID,
-                    "reading_type": reading_type,
-                    "value": value,
-                    "unit": unit,
-                    "latitude": float(latitude) if latitude else None,
-                    "longitude": float(longitude) if longitude else None,
-                    "altitude": float(decoded["altitude"]) if decoded.get("altitude") else None,
-                    "geo_country": geo_country,
-                    "geo_subdivision": geo_subdivision,
-                    "board_model": decoded.get("board_type") or "",
-                    "sensor_model": sensor_model or "",
-                    "deployment_type": deployment_type,
-                    "deployment_type_source": deployment_type_source,
-                    "transport_type": "wifi",
-                    "deployment_location": "",
-                    "node_name": decoded.get("node_name") or "",
-                    "node_info": decoded.get("node_info") or "",
-                    "node_info_url": decoded.get("node_info_url") or "",
-                    "signature": signed.signature.hex(),
-                    "ingester_id": self.key_manager.ingester_id,
-                    "key_version": self.key_manager.key_version,
-                })
-
-            # Publish per-reading to MQTT for P2P distribution via zenoh-bridge
-            mqtt_dict = {
-                "timestamp": reading_timestamp,
-                "device_id": device_id,
-                "data_source": "wesense",
-                "data_source_name": "WeSense",
                 "reading_type": reading_type,
                 "value": value,
                 "unit": unit,
                 "latitude": latitude,
                 "longitude": longitude,
                 "altitude": decoded.get("altitude"),
+                "data_source": "wesense",
+                "data_source_name": "WeSense",
+                "sensor_transport": "wifi",
                 "geo_country": geo_country,
                 "geo_subdivision": geo_subdivision,
                 "board_model": decoded.get("board_type") or "",
                 "sensor_model": sensor_model or "",
                 "deployment_type": deployment_type,
                 "deployment_type_source": deployment_type_source,
-                "transport_type": "wifi",
                 "node_name": decoded.get("node_name") or "",
-            }
-            self.publisher.publish_reading(mqtt_dict)
+                "node_info": decoded.get("node_info") or "",
+                "node_info_url": decoded.get("node_info_url") or "",
+                "location_source": "gps",
+                "network_source": "mqtt",
+            })
 
         self.stats["wifi_readings"] += 1
 
@@ -696,7 +626,7 @@ class WeSenseIngester:
 
         # Geocode if we have coords but no geo data
         if latitude and longitude and not geo_country:
-            geo = self.geocoder.reverse_geocode(latitude, longitude)
+            geo = self.pipeline.geocoder.reverse_geocode(latitude, longitude)
             if geo:
                 geo_country = geo["geo_country"]
                 geo_subdivision = geo["geo_subdivision"]
@@ -726,71 +656,30 @@ class WeSenseIngester:
             decimals = READING_DECIMALS.get(reading_type, 2)
             value = round(float(raw_value), decimals)
 
-            # Sign the reading for ClickHouse persistence
-            signing_dict = {
+            self.pipeline.process({
                 "device_id": device_id,
-                "data_source": "wesense",
                 "timestamp": timestamp,
-                "reading_type": reading_type,
-                "value": value,
-                "latitude": latitude,
-                "longitude": longitude,
-                "transport_type": "lorawan",
-            }
-            signed = self.signer.sign(json.dumps(signing_dict, sort_keys=True).encode())
-
-            if self.gateway_client:
-                self.gateway_client.add({
-                    "timestamp": timestamp,
-                    "device_id": device_id,
-                    "data_source": "wesense",
-                    "data_source_name": "WeSense",
-                    "network_source": network_source,
-                    "ingestion_node_id": INGESTION_NODE_ID,
-                    "reading_type": reading_type,
-                    "value": value,
-                    "unit": unit,
-                    "latitude": float(latitude) if latitude else None,
-                    "longitude": float(longitude) if longitude else None,
-                    "altitude": float(altitude) if altitude else None,
-                    "geo_country": geo_country,
-                    "geo_subdivision": geo_subdivision,
-                    "board_model": board_type or "",
-                    "sensor_model": sensor_model or "",
-                    "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
-                    "deployment_type_source": deployment_type_source,
-                    "transport_type": "lorawan",
-                    "deployment_location": "",
-                    "node_name": node_name or "",
-                    "node_info": node_info or "",
-                    "node_info_url": node_info_url or "",
-                    "signature": signed.signature.hex(),
-                    "ingester_id": self.key_manager.ingester_id,
-                    "key_version": self.key_manager.key_version,
-                })
-
-            # Publish per-reading to MQTT for P2P distribution via zenoh-bridge
-            mqtt_dict = {
-                "timestamp": timestamp,
-                "device_id": device_id,
-                "data_source": "wesense",
-                "data_source_name": "WeSense",
                 "reading_type": reading_type,
                 "value": value,
                 "unit": unit,
                 "latitude": latitude,
                 "longitude": longitude,
                 "altitude": altitude,
+                "data_source": "wesense",
+                "data_source_name": "WeSense",
+                "sensor_transport": "lorawan",
                 "geo_country": geo_country,
                 "geo_subdivision": geo_subdivision,
                 "board_model": board_type or "",
                 "sensor_model": sensor_model or "",
                 "deployment_type": deployment_type if deployment_type != "DEPLOYMENT_UNKNOWN" else "UNKNOWN",
                 "deployment_type_source": deployment_type_source,
-                "transport_type": "lorawan",
                 "node_name": node_name or "",
-            }
-            self.publisher.publish_reading(mqtt_dict)
+                "node_info": node_info or "",
+                "node_info_url": node_info_url or "",
+                "location_source": "gps",
+                "network_source": network_source,
+            })
 
         self.stats["lora_readings"] += 1
 
@@ -900,9 +789,13 @@ class WeSenseIngester:
 
         @app.route("/health", methods=["GET"])
         def health():
+            mqtt_connected = (
+                self.pipeline._publisher.is_connected()
+                if self.pipeline._publisher else False
+            )
             return jsonify({
                 "status": "healthy",
-                "mqtt_connected": self.publisher.is_connected(),
+                "mqtt_connected": mqtt_connected,
             }), 200
 
         @app.route("/ttn/uplink", methods=["POST"])
@@ -1019,10 +912,9 @@ class WeSenseIngester:
     # ── Stats ─────────────────────────────────────────────────────
 
     def print_stats(self):
-        storage_stats = (
-            self.gateway_client.get_stats()
-            if self.gateway_client
-            else {"total_written": 0, "buffer_size": 0}
+        pipeline_stats = self.pipeline.get_stats()
+        storage_stats = pipeline_stats.get(
+            "gateway", {"total_written": 0, "buffer_size": 0}
         )
         cache_stats = self.metadata_cache.get_stats()
 
@@ -1061,12 +953,10 @@ class WeSenseIngester:
 
         if hasattr(self, 'registry_client'):
             self.registry_client.close()
-        if self.gateway_client:
-            self.gateway_client.close()
         if self.mqtt_client:
             self.mqtt_client.loop_stop()
             self.mqtt_client.disconnect()
-        self.publisher.close()
+        self.pipeline.close()
 
         self.logger.info("Shutdown complete")
 
