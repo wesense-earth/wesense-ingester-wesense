@@ -25,7 +25,6 @@ import hmac
 import json
 import logging
 import os
-import signal
 import sys
 import threading
 import time
@@ -35,11 +34,8 @@ from typing import Any, Dict, Optional
 
 import paho.mqtt.client as mqtt
 
-from wesense_ingester import ReadingPipeline, setup_logging
+from wesense_ingester import ReadingPipeline, Shutdown, setup_logging
 from wesense_ingester.mqtt.publisher import MQTTPublisherConfig, configure_mqtt_tls
-from wesense_ingester.registry.config import RegistryConfig
-from wesense_ingester.registry.client import RegistryClient
-from wesense_ingester.signing.trust import TrustStore
 
 # Protobuf support
 sys.path.insert(0, str(Path(__file__).parent / "proto"))
@@ -304,24 +300,6 @@ class WeSenseIngester:
             name="wesense", mqtt_config=mqtt_config, enable_dedup=False,
         )
 
-        # OrbitDB registry — node registration + trust sync
-        self.trust_store = TrustStore()
-        registry_config = RegistryConfig.from_env()
-        self.registry_client = RegistryClient(
-            config=registry_config,
-            trust_store=self.trust_store,
-        )
-        try:
-            self.registry_client.register_node(
-                ingester_id=self.pipeline.ingester_id,
-                public_key_bytes=self.pipeline.key_manager.public_key_bytes,
-                key_version=self.pipeline.key_manager.key_version,
-            )
-        except Exception as e:
-            self.logger.warning("OrbitDB registration failed (%s), will retry on next trust sync", e)
-        self.registry_client.start_trust_sync()
-        self.logger.info("OrbitDB registry — trust sync active")
-
         # LoRa metadata cache
         cache_file = os.getenv("METADATA_CACHE_FILE", "cache/metadata_cache.json")
         os.makedirs(os.path.dirname(cache_file) or ".", exist_ok=True)
@@ -329,7 +307,6 @@ class WeSenseIngester:
 
         # MQTT input client
         self.mqtt_client = None
-        self.running = True
 
         # Stats
         self.stats = {
@@ -947,12 +924,9 @@ class WeSenseIngester:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def shutdown(self, signum=None, frame=None):
+    def _cleanup(self):
         self.logger.info("Shutting down...")
-        self.running = False
 
-        if hasattr(self, 'registry_client'):
-            self.registry_client.close()
         if self.mqtt_client:
             self.mqtt_client.loop_stop()
             self.mqtt_client.disconnect()
@@ -961,8 +935,7 @@ class WeSenseIngester:
         self.logger.info("Shutdown complete")
 
     def run(self):
-        signal.signal(signal.SIGINT, self.shutdown)
-        signal.signal(signal.SIGTERM, self.shutdown)
+        shutdown = Shutdown(name="wesense")
 
         self.logger.info("=" * 60)
         self.logger.info("WeSense Ingester (Unified: WiFi + LoRa + TTN)")
@@ -990,7 +963,7 @@ class WeSenseIngester:
 
         self.logger.info("Connecting to MQTT broker %s:%d", input_broker, input_port)
         retry_delay = 5
-        while self.running:
+        while not shutdown.requested:
             try:
                 self.mqtt_client.connect(input_broker, input_port, keepalive=60)
                 break
@@ -998,8 +971,14 @@ class WeSenseIngester:
                 self.logger.warning(
                     "MQTT broker not available (%s), retrying in %ds", e, retry_delay,
                 )
-                time.sleep(retry_delay)
+                if shutdown.sleep(retry_delay):
+                    break
                 retry_delay = min(retry_delay * 2, 60)
+
+        if shutdown.requested:
+            self._cleanup()
+            return
+
         self.mqtt_client.loop_start()
 
         # Start TTN webhook if enabled
@@ -1009,13 +988,12 @@ class WeSenseIngester:
             self.logger.info("TTN webhook disabled (set TTN_WEBHOOK_ENABLED=true to enable)")
 
         # Main loop with periodic stats
-        try:
-            while self.running:
-                time.sleep(STATS_INTERVAL)
-                self.print_stats()
-        except KeyboardInterrupt:
-            self.shutdown()
-            sys.exit(0)
+        while not shutdown.requested:
+            if shutdown.sleep(STATS_INTERVAL):
+                break
+            self.print_stats()
+
+        self._cleanup()
 
 
 def main():
