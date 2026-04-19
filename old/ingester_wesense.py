@@ -6,7 +6,7 @@ Specialized ingester for WeSense WiFi sensors.
 Architecture:
 - Input Layer: MQTT subscriber (wesense/v2/wifi/#)
 - Decode Layer: Protobuf parser for WeSense v2.2 format
-- Output Layer: ClickHouse (primary) + optional MQTT (debugging)
+- Output Layer: Storage gateway (primary) + optional MQTT (debugging)
 
 Message Format:
 - WeSense v2.1: SensorReadingV2 with repeated SensorValue measurements
@@ -28,9 +28,8 @@ import json
 import logging
 import logging.handlers
 import argparse
-import threading
 import time
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,13 +40,9 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# ClickHouse support
-try:
-    import clickhouse_connect
-    CLICKHOUSE_AVAILABLE = True
-except ImportError:
-    CLICKHOUSE_AVAILABLE = False
-    print("Warning: clickhouse_connect not available. Install with: pip install clickhouse-connect")
+# Gateway client for writing readings
+from wesense_ingester.gateway.client import GatewayClient
+from wesense_ingester.gateway.config import GatewayConfig
 
 # Add proto directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'proto'))
@@ -86,15 +81,8 @@ future_timestamp_logger.addHandler(_future_ts_handler)
 # =====================================================================
 DEBUG = os.getenv('DEBUG', 'false').lower() in ('true', '1', 'yes')
 
-# ClickHouse settings
-CLICKHOUSE_HOST = os.getenv('CLICKHOUSE_HOST', 'localhost')
-CLICKHOUSE_PORT = int(os.getenv('CLICKHOUSE_PORT', '8123'))
-CLICKHOUSE_USER = os.getenv('CLICKHOUSE_USER', 'default')
-CLICKHOUSE_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', '')
-CLICKHOUSE_DATABASE = os.getenv('CLICKHOUSE_DATABASE', 'wesense')
-CLICKHOUSE_TABLE = os.getenv('CLICKHOUSE_TABLE', 'sensor_readings')
-CLICKHOUSE_BATCH_SIZE = int(os.getenv('CLICKHOUSE_BATCH_SIZE', '100'))
-CLICKHOUSE_FLUSH_INTERVAL = int(os.getenv('CLICKHOUSE_FLUSH_INTERVAL', '5'))
+# Gateway client instance (initialised in main)
+gateway_client: GatewayClient | None = None
 
 # Ingestion node ID (for tracking which ingester wrote the data)
 INGESTION_NODE_ID = os.getenv('INGESTION_NODE_ID', 'wesense-ingester-1')
@@ -264,117 +252,28 @@ DEPLOYMENT_TYPE_MAP = {
 
 # Transport type mapping
 TRANSPORT_TYPE_MAP = {
-    'TRANSPORT_UNKNOWN': 'UNKNOWN',
-    'WIFI_MQTT': 'WIFI',
-    'LORAWAN': 'LORA',
-    'TRANSPORT_MESHTASTIC': 'MESHTASTIC',
-    'CELLULAR': 'CELLULAR',
-    'SATELLITE': 'SATELLITE',
+    'TRANSPORT_UNKNOWN': 'unknown',
+    'WIFI_MQTT': 'wifi',
+    'LORAWAN': 'lorawan',
+    'TRANSPORT_MESHTASTIC': 'meshtastic',
+    'CELLULAR': 'cellular',
+    'SATELLITE': 'satellite',
 }
 
 # =====================================================================
-# ClickHouse Client
+# Storage Gateway
 # =====================================================================
-clickhouse_client = None
-clickhouse_buffer = []
-clickhouse_buffer_lock = threading.Lock()
-clickhouse_flush_timer = None
-
-
-def flush_clickhouse_buffer():
-    """Flush the ClickHouse write buffer to the database"""
-    global clickhouse_buffer, clickhouse_flush_timer
-
-    with clickhouse_buffer_lock:
-        if not clickhouse_buffer or not clickhouse_client:
-            return
-
-        rows_to_insert = clickhouse_buffer.copy()
-        clickhouse_buffer = []
-
+def init_gateway():
+    """Initialise the storage gateway client."""
+    global gateway_client
     try:
-        # Column names matching the sensor_readings schema
-        columns = [
-            'timestamp', 'device_id', 'data_source', 'network_source', 'ingestion_node_id',
-            'reading_type', 'value', 'unit',
-            'latitude', 'longitude', 'altitude', 'geo_country', 'geo_subdivision',
-            'board_model', 'sensor_model', 'deployment_type', 'deployment_type_source',
-            'transport_type', 'deployment_location', 'node_name', 'node_info', 'node_info_url'
-        ]
-
-        clickhouse_client.insert(
-            f'{CLICKHOUSE_DATABASE}.{CLICKHOUSE_TABLE}',
-            rows_to_insert,
-            column_names=columns
-        )
-
-        logger.info(f"[ClickHouse] Flushed {len(rows_to_insert)} rows")
-
-    except Exception as e:
-        logger.error(f"[ClickHouse] Flush failed: {e}")
-        # Put rows back in buffer for retry
-        with clickhouse_buffer_lock:
-            clickhouse_buffer = rows_to_insert + clickhouse_buffer
-
-
-def schedule_clickhouse_flush():
-    """Schedule the next buffer flush"""
-    global clickhouse_flush_timer
-    if clickhouse_flush_timer:
-        clickhouse_flush_timer.cancel()
-    clickhouse_flush_timer = threading.Timer(CLICKHOUSE_FLUSH_INTERVAL, periodic_flush)
-    clickhouse_flush_timer.daemon = True
-    clickhouse_flush_timer.start()
-
-
-def periodic_flush():
-    """Periodic flush callback"""
-    if DEBUG:
-        logger.debug(f"[ClickHouse] Periodic flush, buffer size: {len(clickhouse_buffer)}")
-    flush_clickhouse_buffer()
-    schedule_clickhouse_flush()
-
-
-def add_to_clickhouse_buffer(row: Tuple):
-    """Add a row to the ClickHouse buffer and flush if needed"""
-    global clickhouse_buffer
-
-    with clickhouse_buffer_lock:
-        clickhouse_buffer.append(row)
-        buffer_size = len(clickhouse_buffer)
-
-    if buffer_size >= CLICKHOUSE_BATCH_SIZE:
-        flush_clickhouse_buffer()
-
-
-def init_clickhouse():
-    """Initialize ClickHouse connection"""
-    global clickhouse_client
-
-    if not CLICKHOUSE_AVAILABLE:
-        logger.warning("ClickHouse client not available, data will not be persisted")
-        return False
-
-    try:
-        clickhouse_client = clickhouse_connect.get_client(
-            host=CLICKHOUSE_HOST,
-            port=CLICKHOUSE_PORT,
-            username=CLICKHOUSE_USER,
-            password=CLICKHOUSE_PASSWORD,
-            database=CLICKHOUSE_DATABASE,
-        )
-
-        # Test connection
-        clickhouse_client.ping()
-        logger.info(f"[ClickHouse] Connected to {CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/{CLICKHOUSE_DATABASE}")
-
-        # Start periodic flush timer
-        schedule_clickhouse_flush()
+        gateway_client = GatewayClient(config=GatewayConfig.from_env())
+        logger.info("Gateway client initialised")
         return True
-
     except Exception as e:
-        logger.error(f"[ClickHouse] Connection failed: {e}")
-        clickhouse_client = None
+        logger.error(f"Failed to create gateway client: {e}")
+        logger.warning("Continuing without storage (MQTT only)")
+        gateway_client = None
         return False
 
 
@@ -448,7 +347,7 @@ class ProtobufDecoder:
                 # Device info
                 'device_id': f"wesense_{msg.device_id:016x}",
                 'device_id_hex': f"0x{msg.device_id:016X}",
-                'data_source': 'WESENSE',
+                'data_source': 'wesense',
 
                 # Temporal
                 'timestamp': msg.timestamp,
@@ -471,7 +370,7 @@ class ProtobufDecoder:
 
                 # Deployment context (transport_type inferred from topic, not message)
                 'deployment_type': DEPLOYMENT_TYPE_MAP.get(deployment_type_name, 'UNKNOWN'),
-                'transport_type': 'WIFI',  # This ingester only handles WiFi
+                'transport_type': 'wifi',  # This ingester only handles WiFi
 
                 # All sensor measurements
                 'measurements': measurements,
@@ -567,7 +466,7 @@ class MQTTInputHandler:
             logger.error(f"Error processing message: {e}", exc_info=True)
 
     def _handle_protobuf(self, topic: str, payload: bytes):
-        """Decode protobuf and write to ClickHouse"""
+        """Decode protobuf and write to storage gateway"""
         decoded = self.decoder.decode_sensor_reading(payload)
         if not decoded:
             return
@@ -598,7 +497,7 @@ class MQTTInputHandler:
 
         # Format: wesense/v2/wifi/{country}/{subdivision}/{device_id}
         if len(topic_parts) >= 6 and topic_parts[0] == 'wesense' and topic_parts[2] == 'wifi':
-            network_source = "wesense/v2/wifi"
+            network_source = "mqtt"
             # Use geocoded values if available, otherwise fall back to topic
             if not geo_country:
                 geo_country = topic_parts[3].upper()
@@ -606,97 +505,94 @@ class MQTTInputHandler:
                 geo_subdivision = topic_parts[4]
         # Legacy format: wesense/v2/{country}/{subdivision}/{device_id}
         elif len(topic_parts) >= 5 and topic_parts[0] == 'wesense' and topic_parts[1] in ('v1', 'v2'):
-            network_source = f"{topic_parts[0]}/{topic_parts[1]}"
+            network_source = "mqtt"
             if not geo_country:
                 geo_country = topic_parts[2].upper()
             if not geo_subdivision:
                 geo_subdivision = topic_parts[3]
         else:
-            network_source = topic
+            network_source = "mqtt"
 
-        # Write each measurement to ClickHouse
-        if clickhouse_client:
-            device_id = decoded['device_id']
-            timestamp = decoded['timestamp']
+        # Write each measurement to storage gateway
+        device_id = decoded['device_id']
+        timestamp = decoded['timestamp']
 
-            # Check for future timestamps
-            current_time = int(time.time())
-            time_delta = timestamp - current_time
-            if time_delta > FUTURE_TIMESTAMP_TOLERANCE:
-                node_name = decoded.get('node_name') or device_id
-                # Format delta for readability
-                if time_delta > 86400:
-                    delta_str = f"{time_delta / 86400:.1f} days"
-                elif time_delta > 3600:
-                    delta_str = f"{time_delta / 3600:.1f} hours"
-                elif time_delta > 60:
-                    delta_str = f"{time_delta / 60:.1f} minutes"
-                else:
-                    delta_str = f"{time_delta} seconds"
+        # Check for future timestamps
+        current_time = int(time.time())
+        time_delta = timestamp - current_time
+        if time_delta > FUTURE_TIMESTAMP_TOLERANCE:
+            node_name = decoded.get('node_name') or device_id
+            # Format delta for readability
+            if time_delta > 86400:
+                delta_str = f"{time_delta / 86400:.1f} days"
+            elif time_delta > 3600:
+                delta_str = f"{time_delta / 3600:.1f} hours"
+            elif time_delta > 60:
+                delta_str = f"{time_delta / 60:.1f} minutes"
+            else:
+                delta_str = f"{time_delta} seconds"
 
-                future_timestamp_logger.warning(
-                    f"FUTURE_TIMESTAMP | node_name={node_name} | device_id={device_id} | "
-                    f"timestamp={datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')} | "
-                    f"ahead_by={delta_str} | raw_delta_seconds={time_delta}"
-                )
-                if DEBUG:
-                    logger.warning(f"⏰ FUTURE TIMESTAMP {node_name}: {delta_str} ahead - SKIPPING")
-                return  # Skip this message
+            future_timestamp_logger.warning(
+                f"FUTURE_TIMESTAMP | node_name={node_name} | device_id={device_id} | "
+                f"timestamp={datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"ahead_by={delta_str} | raw_delta_seconds={time_delta}"
+            )
+            if DEBUG:
+                logger.warning(f"FUTURE TIMESTAMP {node_name}: {delta_str} ahead - SKIPPING")
+            return  # Skip this message
 
-            deployment_type = decoded.get('deployment_type', 'UNKNOWN')
-            # WeSense sensors have deployment_type set in firmware config, so source is 'manual'
-            # If deployment_type is UNKNOWN, source should also be 'unknown'
-            deployment_type_source = 'manual' if deployment_type != 'UNKNOWN' else 'unknown'
-            transport_type = decoded.get('transport_type', 'WIFI')
-            altitude = decoded.get('altitude')
-            board_type = decoded.get('board_type') or ''
-            node_name = decoded.get('node_name')
-            node_info = decoded.get('node_info')
-            node_info_url = decoded.get('node_info_url')
+        deployment_type = decoded.get('deployment_type', 'UNKNOWN')
+        # WeSense sensors have deployment_type set in firmware config, so source is 'manual'
+        # If deployment_type is UNKNOWN, source should also be 'unknown'
+        deployment_type_source = 'manual' if deployment_type != 'UNKNOWN' else 'unknown'
+        transport_type = decoded.get('transport_type', 'wifi')
+        altitude = decoded.get('altitude')
+        board_type = decoded.get('board_type') or ''
+        node_name = decoded.get('node_name')
+        node_info = decoded.get('node_info')
+        node_info_url = decoded.get('node_info_url')
 
-            for measurement in decoded.get('measurements', []):
-                reading_type = measurement['reading_type']
-                raw_value = measurement['value']
-                sensor_model = measurement.get('sensor_model')
-                unit = READING_UNITS.get(reading_type, '')
+        for measurement in decoded.get('measurements', []):
+            reading_type = measurement['reading_type']
+            raw_value = measurement['value']
+            sensor_model = measurement.get('sensor_model')
+            unit = READING_UNITS.get(reading_type, '')
 
-                # Round value to appropriate decimal places (avoid float precision noise)
-                decimals = READING_DECIMALS.get(reading_type, 2)
-                value = round(float(raw_value), decimals)
+            # Round value to appropriate decimal places (avoid float precision noise)
+            decimals = READING_DECIMALS.get(reading_type, 2)
+            value = round(float(raw_value), decimals)
 
-                # Use per-reading timestamp if different from header
-                reading_timestamp = measurement.get('timestamp', timestamp)
+            # Use per-reading timestamp if different from header
+            reading_timestamp = measurement.get('timestamp', timestamp)
 
-                # Build row tuple matching column order
-                # Use empty strings for non-nullable LowCardinality(String) columns
-                row = (
-                    datetime.fromtimestamp(reading_timestamp, tz=timezone.utc),  # timestamp
-                    device_id,                    # device_id
-                    'WESENSE',                    # data_source
-                    network_source,               # network_source
-                    INGESTION_NODE_ID,            # ingestion_node_id
-                    reading_type,                 # reading_type
-                    value,                        # value (rounded)
-                    unit,                         # unit
-                    float(latitude) if latitude else None,   # latitude (Nullable)
-                    float(longitude) if longitude else None, # longitude (Nullable)
-                    float(altitude) if altitude else None,   # altitude (Nullable)
-                    geo_country or '',            # geo_country
-                    geo_subdivision or '',        # geo_subdivision
-                    board_type,                   # board_model
-                    sensor_model or '',           # sensor_model
-                    deployment_type,              # deployment_type
-                    deployment_type_source,       # deployment_type_source
-                    transport_type,               # transport_type
-                    '',                           # deployment_location
-                    node_name,                    # node_name (Nullable)
-                    node_info,                    # node_info (Nullable)
-                    node_info_url,                # node_info_url (Nullable)
-                )
+            if gateway_client:
+                gateway_client.add({
+                    "timestamp": reading_timestamp,
+                    "device_id": device_id,
+                    "data_source": "wesense",
+                    "data_source_name": "WeSense",
+                    "network_source": network_source,
+                    "ingestion_node_id": INGESTION_NODE_ID,
+                    "reading_type": reading_type,
+                    "value": value,
+                    "unit": unit,
+                    "latitude": float(latitude) if latitude else None,
+                    "longitude": float(longitude) if longitude else None,
+                    "altitude": float(altitude) if altitude else None,
+                    "geo_country": geo_country or "",
+                    "geo_subdivision": geo_subdivision or "",
+                    "board_model": board_type,
+                    "sensor_model": sensor_model or "",
+                    "deployment_type": deployment_type,
+                    "deployment_type_source": deployment_type_source,
+                    "transport_type": transport_type,
+                    "deployment_location": "",
+                    "node_name": node_name or "",
+                    "node_info": node_info or "",
+                    "node_info_url": node_info_url or "",
+                })
 
-                add_to_clickhouse_buffer(row)
-
-            logger.info(f"[{geo_country}/{geo_subdivision}] Buffered {len(decoded['measurements'])} readings from {device_id}")
+        logger.info(f"[{geo_country}/{geo_subdivision}] Buffered {len(decoded['measurements'])} readings from {device_id}")
 
         # Optionally publish to MQTT for debugging
         if self.mqtt_output:
@@ -786,8 +682,8 @@ def main():
     logger.info(f"Loading configuration from {args.config}")
     config = load_config(args.config)
 
-    # Initialize ClickHouse
-    init_clickhouse()
+    # Initialise storage gateway
+    init_gateway()
 
     # Initialize decoder
     decoder = ProtobufDecoder()
@@ -805,11 +701,9 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
-        # Final flush
-        flush_clickhouse_buffer()
-        if clickhouse_client:
-            clickhouse_client.close()
-            logger.info("[ClickHouse] Connection closed")
+        if gateway_client:
+            gateway_client.close()
+            logger.info("Gateway client closed")
 
 
 if __name__ == '__main__':

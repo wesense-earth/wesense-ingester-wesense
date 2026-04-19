@@ -1,16 +1,13 @@
-#!/bin/bash
+#!/bin/sh
+# entrypoint.sh — Fix directory ownership, generate config, then drop to PUID:PGID
 set -e
 
-# LinuxServer.io style PUID/PGID support
-PUID=${PUID:-1000}
-PGID=${PGID:-1000}
+PUID="${PUID:-1000}"
+PGID="${PGID:-1000}"
 
-# Update user/group if needed
-if [ "$(id -u wesense)" != "$PUID" ] || [ "$(id -g wesense)" != "$PGID" ]; then
-    echo "[entrypoint] Updating wesense user to PUID=$PUID, PGID=$PGID"
-    groupmod -o -g "$PGID" wesense
-    usermod -o -u "$PUID" wesense
-fi
+# Ensure writable directories exist with correct ownership
+mkdir -p /app/cache /app/logs /app/data/keys /app/config
+chown -R "$PUID:$PGID" /app/cache /app/logs /app/data /app/config
 
 # Generate config.yaml from environment variables if it doesn't exist
 CONFIG_FILE="/app/config/config.yaml"
@@ -18,7 +15,6 @@ CONFIG_FILE="/app/config/config.yaml"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "[entrypoint] Generating config.yaml from environment variables"
 
-    # Determine output type (default to none, MQTT output for debugging only)
     OUTPUT_TYPE=${OUTPUT_TYPE:-none}
 
     cat > "$CONFIG_FILE" <<EOF
@@ -50,14 +46,11 @@ logging:
   level: ${LOG_LEVEL:-INFO}
 EOF
 
+    chown "$PUID:$PGID" "$CONFIG_FILE"
     echo "[entrypoint] Config generated at $CONFIG_FILE"
 else
     echo "[entrypoint] Using existing config at $CONFIG_FILE"
 fi
 
-# Fix permissions on app directory (including utils, config, logs, cache)
-chown -R wesense:wesense /app 2>/dev/null || true
-chmod -R 755 /app/utils 2>/dev/null || true
-
-# Switch to wesense user and execute command
-exec gosu wesense "$@"
+exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups \
+    python -u main.py "$@"
