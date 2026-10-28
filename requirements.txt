@@ -12,4 +12,4 @@ python-dotenv>=1.0.0
 reverse_geocoder==1.5.1
 
 # ClickHouse client
-clickhouse-connect>=0.7.0
+clickhouse-connect>=1.11.0
