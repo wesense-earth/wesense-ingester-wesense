@@ -2,7 +2,7 @@
 paho-mqtt>=1.6.1,<2.0.0
 
 # Protobuf for WeSense v2 format
-protobuf>=5.26.0
+protobuf>=7.36.2
 
 # Configuration
 pyyaml>=6.0,<7.0
