@@ -1,5 +1,5 @@
 # MQTT client
-paho-mqtt>=2.1.0,<3.0.0
+paho-mqtt>=2.2.0,<3.0.0
 
 # Protobuf for WeSense v2 format
 protobuf>=7.36.2
