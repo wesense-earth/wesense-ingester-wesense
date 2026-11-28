@@ -6,7 +6,7 @@ protobuf>=7.36.2
 
 # Configuration
 pyyaml>=6.0.3,<7.0
-python-dotenv>=1.0.0
+python-dotenv>=1.2.4
 
 # Reverse geocoding (GeoNames offline database)
 reverse_geocoder==1.5.1
